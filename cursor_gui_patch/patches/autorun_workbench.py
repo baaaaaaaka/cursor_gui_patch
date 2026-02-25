@@ -12,9 +12,11 @@ _MARKER = "CGP_PATCH_AUTORUN_WORKBENCH"
 _OLD_DEFAULT = "isAdminControlled:!1,isDisabledByAdmin:!0"
 _NEW_DEFAULT = "isAdminControlled:!1,isDisabledByAdmin:!1"
 
-# Computed value: result of team settings evaluation
-_OLD_COMPUTED = "isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D"
-_NEW_COMPUTED = "isDisabledByAdmin:!1"
+# Computed value: result of team settings evaluation.
+# Must also flip isAdminControlled to !1 so the UI doesn't enter
+# non-editable admin-controlled mode.
+_OLD_COMPUTED = "isAdminControlled:!0,isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D"
+_NEW_COMPUTED = "isAdminControlled:!1,isDisabledByAdmin:!1"
 
 
 class AutoRunWorkbenchPatch(BasePatch):

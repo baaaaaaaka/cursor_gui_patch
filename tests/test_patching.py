@@ -38,7 +38,7 @@ MODELS_CONTENT = (
 # Realistic sample content for workbench.desktop.main.js (autorun_workbench patch target)
 WORKBENCH_CONTENT = (
     'prefix;{isAdminControlled:!1,isDisabledByAdmin:!0,allowed:[],blocked:[]};'
-    'function compute(v,w,S,k,D){return{isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D}}'
+    'o={isAdminControlled:!0,isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D,browserFeatures:r?.browserFeatures};'
     'suffix;'
 )
 
@@ -331,6 +331,7 @@ class TestWorkbenchPatch(unittest.TestCase):
             content = wb.read_text()
             self.assertIn("isDisabledByAdmin:!1", content)
             self.assertNotIn("isDisabledByAdmin:!0", content)
+            self.assertNotIn("isAdminControlled:!0", content)
             self.assertIn("CGP_PATCH_AUTORUN_WORKBENCH", content)
 
     def test_workbench_patch_idempotent(self):
