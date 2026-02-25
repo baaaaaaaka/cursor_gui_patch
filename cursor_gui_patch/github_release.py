@@ -215,35 +215,64 @@ def _normalize_arch(machine: str) -> str:
     return m or "unknown"
 
 
+def _platform_suffix(
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+) -> str:
+    """Return the platform suffix, e.g. 'linux-x86_64', 'windows-x86_64'."""
+    sysname = (system or platform.system() or "").lower()
+    arch = _normalize_arch(machine or platform.machine())
+
+    if sysname == "linux":
+        if arch in ("x86_64", "arm64"):
+            return f"linux-{arch}"
+        raise RuntimeError(f"Unsupported Linux arch: {arch}")
+
+    if sysname == "darwin":
+        if arch in ("x86_64", "arm64"):
+            return f"macos-{arch}"
+        raise RuntimeError(f"Unsupported macOS arch: {arch}")
+
+    if sysname == "windows":
+        if arch == "x86_64":
+            return "windows-x86_64"
+        raise RuntimeError(f"Unsupported Windows arch: {arch}")
+
+    raise RuntimeError(f"Unsupported OS: {sysname}")
+
+
 def select_release_asset_name(
     *,
     system: Optional[str] = None,
     machine: Optional[str] = None,
 ) -> str:
-    """Choose the Release asset name for the current platform."""
-    sysname = (system or platform.system() or "").lower()
-    arch = _normalize_arch(machine or platform.machine())
+    """Choose the full Release asset name for the current platform."""
+    suffix = _platform_suffix(system=system, machine=machine)
+    ext = ".zip" if suffix.startswith("windows") else ".tar.gz"
+    return f"cgp-{suffix}{ext}"
 
-    if sysname == "linux":
-        if arch == "x86_64":
-            return "cgp-linux-x86_64.tar.gz"
-        if arch == "arm64":
-            return "cgp-linux-arm64.tar.gz"
-        raise RuntimeError(f"Unsupported Linux arch: {arch}")
 
-    if sysname == "darwin":
-        if arch == "x86_64":
-            return "cgp-macos-x86_64.tar.gz"
-        if arch == "arm64":
-            return "cgp-macos-arm64.tar.gz"
-        raise RuntimeError(f"Unsupported macOS arch: {arch}")
+def select_app_asset_name(
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+) -> str:
+    """Choose the app-only Release asset name for the current platform."""
+    suffix = _platform_suffix(system=system, machine=machine)
+    ext = ".zip" if suffix.startswith("windows") else ".tar.gz"
+    return f"cgp-app-{suffix}{ext}"
 
-    if sysname == "windows":
-        if arch == "x86_64":
-            return "cgp-windows-x86_64.zip"
-        raise RuntimeError(f"Unsupported Windows arch: {arch}")
 
-    raise RuntimeError(f"Unsupported OS: {sysname}")
+def select_runtime_asset_name(
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+) -> str:
+    """Choose the runtime-only Release asset name for the current platform."""
+    suffix = _platform_suffix(system=system, machine=machine)
+    ext = ".zip" if suffix.startswith("windows") else ".tar.gz"
+    return f"cgp-runtime-{suffix}{ext}"
 
 
 def build_release_download_url(repo: str, *, tag: str, asset_name: str) -> str:
@@ -406,6 +435,117 @@ def _install_lock(*, install_root: Path, wait_s: float = 0.0):
             pass
 
 
+def read_local_runtime_version() -> Optional[str]:
+    """Read the RUNTIME_VERSION from the current executable's _internal/ directory."""
+    try:
+        exe = Path(sys.executable).resolve()
+        internal = exe.parent / "_internal"
+        rv_file = internal / "RUNTIME_VERSION"
+        if rv_file.exists():
+            return rv_file.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return None
+
+
+def read_runtime_version_from(internal_dir: Path) -> Optional[str]:
+    """Read the RUNTIME_VERSION from a specific _internal/ directory."""
+    try:
+        rv_file = internal_dir / "RUNTIME_VERSION"
+        if rv_file.exists():
+            return rv_file.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return None
+
+
+def fetch_remote_runtime_version(
+    repo: str,
+    *,
+    tag: str,
+    timeout_s: float = 5.0,
+    fetch: Fetch = _default_fetch,
+) -> Optional[str]:
+    """Fetch runtime_version.txt from a GitHub Release (if it exists)."""
+    try:
+        url = build_release_download_url(repo, tag=tag, asset_name="runtime_version.txt")
+        data = fetch(url, timeout_s, _http_headers())
+        return data.decode("utf-8", "replace").strip()
+    except Exception:
+        return None
+
+
+def _download_and_verify(
+    *,
+    repo: str,
+    tag: str,
+    asset_name: str,
+    timeout_s: float,
+    fetch: Fetch,
+    verify_checksums: bool,
+) -> bytes:
+    """Download an asset and optionally verify its checksum."""
+    url = build_release_download_url(repo, tag=tag, asset_name=asset_name)
+    data = fetch(url, timeout_s, _http_headers())
+
+    checksums: Dict[str, str] = {}
+    if verify_checksums:
+        try:
+            c_url = build_checksums_download_url(repo, tag=tag)
+            c_raw = fetch(c_url, timeout_s, _http_headers())
+            checksums = parse_checksums_txt(c_raw.decode("utf-8", "replace"))
+        except Exception:
+            checksums = {}
+
+    if verify_checksums and checksums:
+        expected = checksums.get(asset_name)
+        if expected:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual.lower() != expected.lower():
+                raise RuntimeError(
+                    f"checksum mismatch for {asset_name}: expected {expected}, got {actual}"
+                )
+
+    return data
+
+
+def _setup_version_dir(
+    *,
+    install_root: Path,
+    bin_dir: Path,
+    tag: str,
+    tmp_dir: Path,
+) -> Path:
+    """Finalize a version directory: move from tmp, update symlinks. Returns target exe path."""
+    exe_name = "cgp.exe" if sys.platform == "win32" else "cgp"
+    exe = tmp_dir / "cgp" / exe_name
+    if not exe.exists():
+        raise RuntimeError(f"invalid bundle: missing {exe}")
+    try:
+        st = exe.stat()
+        os.chmod(str(exe), st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except Exception:
+        pass
+
+    versions_dir = install_root / "versions"
+    version_dir = versions_dir / tag
+    if version_dir.exists():
+        try:
+            shutil.rmtree(version_dir)
+        except Exception:
+            pass
+    os.replace(str(tmp_dir), str(version_dir))
+
+    current = install_root / "current"
+    _atomic_symlink(version_dir, current)
+
+    target_exe = current / "cgp" / exe_name
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_symlink(target_exe, bin_dir / exe_name)
+
+    return target_exe
+
+
 def download_and_install_release_bundle(
     *,
     repo: str,
@@ -430,26 +570,10 @@ def download_and_install_release_bundle(
     if not is_zip and not is_tar:
         raise RuntimeError(f"unsupported bundle asset: {asset_name}")
 
-    url = build_release_download_url(repo, tag=tag, asset_name=asset_name)
-    data = fetch(url, timeout_s, _http_headers())
-
-    checksums: Dict[str, str] = {}
-    if verify_checksums:
-        try:
-            c_url = build_checksums_download_url(repo, tag=tag)
-            c_raw = fetch(c_url, timeout_s, _http_headers())
-            checksums = parse_checksums_txt(c_raw.decode("utf-8", "replace"))
-        except Exception:
-            checksums = {}
-
-    if verify_checksums and checksums:
-        expected = checksums.get(asset_name)
-        if expected:
-            actual = hashlib.sha256(data).hexdigest()
-            if actual.lower() != expected.lower():
-                raise RuntimeError(
-                    f"checksum mismatch for {asset_name}: expected {expected}, got {actual}"
-                )
+    data = _download_and_verify(
+        repo=repo, tag=tag, asset_name=asset_name,
+        timeout_s=timeout_s, fetch=fetch, verify_checksums=verify_checksums,
+    )
 
     install_root = install_root.expanduser()
     bin_dir = bin_dir.expanduser()
@@ -472,32 +596,91 @@ def download_and_install_release_bundle(
             else:
                 _safe_extract_zip(data, dest_dir=tmp_dir)
 
-            exe_name = "cgp.exe" if sys.platform == "win32" else "cgp"
-            exe = tmp_dir / "cgp" / exe_name
-            if not exe.exists():
-                raise RuntimeError(f"invalid bundle: missing {exe}")
-            try:
-                st = exe.stat()
-                os.chmod(str(exe), st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            except Exception:
-                pass
-
-            version_dir = versions_dir / tag
-            if version_dir.exists():
+            return _setup_version_dir(
+                install_root=install_root,
+                bin_dir=bin_dir,
+                tag=tag,
+                tmp_dir=tmp_dir,
+            )
+        finally:
+            if tmp_dir.exists():
                 try:
-                    shutil.rmtree(version_dir)
+                    shutil.rmtree(tmp_dir)
                 except Exception:
                     pass
-            os.replace(str(tmp_dir), str(version_dir))
 
-            current = install_root / "current"
-            _atomic_symlink(version_dir, current)
 
-            target_exe = current / "cgp" / exe_name
-            bin_dir.mkdir(parents=True, exist_ok=True)
-            _atomic_symlink(target_exe, bin_dir / exe_name)
+def download_and_install_app_only(
+    *,
+    repo: str,
+    tag: str,
+    app_asset_name: str,
+    existing_internal: Path,
+    install_root: Path,
+    bin_dir: Path,
+    timeout_s: float = 30.0,
+    fetch: Fetch = _default_fetch,
+    verify_checksums: bool = True,
+) -> Path:
+    """
+    Download app-only archive and reuse existing _internal/ runtime.
 
-            return target_exe
+    This is a fast update path: only the executable (~1MB) is downloaded
+    instead of the full bundle (~4MB+). The existing _internal/ directory
+    is reused via symlink (Unix) or copy (Windows).
+    """
+    is_zip = app_asset_name.endswith(".zip")
+    is_tar = app_asset_name.endswith(".tar.gz")
+    if not is_zip and not is_tar:
+        raise RuntimeError(f"unsupported app asset: {app_asset_name}")
+
+    if not existing_internal.is_dir():
+        raise RuntimeError(f"existing _internal/ not found: {existing_internal}")
+
+    data = _download_and_verify(
+        repo=repo, tag=tag, asset_name=app_asset_name,
+        timeout_s=timeout_s, fetch=fetch, verify_checksums=verify_checksums,
+    )
+
+    install_root = install_root.expanduser()
+    bin_dir = bin_dir.expanduser()
+
+    with _install_lock(install_root=install_root, wait_s=0.0):
+        root_cmp = _resolve_for_compare(install_root)
+        if _is_within(bin_dir, root_cmp / "current") or _is_within(bin_dir, root_cmp / "versions"):
+            raise RuntimeError(
+                f"refusing to install into {bin_dir}: it is inside the cgp bundle root {install_root}. "
+                "Set CGP_INSTALL_DEST to a directory outside the bundle (e.g. ~/.local/bin)."
+            )
+
+        versions_dir = install_root / "versions"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix=".cgp-extract-", dir=str(versions_dir)))
+        try:
+            # Extract app-only archive (contains cgp/cgp executable only)
+            if is_tar:
+                _safe_extract_tar_gz(data, dest_dir=tmp_dir)
+            else:
+                _safe_extract_zip(data, dest_dir=tmp_dir)
+
+            # Link or copy existing _internal/ into the new version
+            new_internal = tmp_dir / "cgp" / "_internal"
+            existing_resolved = _resolve_for_compare(existing_internal)
+
+            if sys.platform == "win32":
+                # Windows: copy the runtime directory
+                shutil.copytree(str(existing_resolved), str(new_internal))
+            else:
+                # Unix: symlink to save space and time
+                os.symlink(str(existing_resolved), str(new_internal))
+
+            return _setup_version_dir(
+                install_root=install_root,
+                bin_dir=bin_dir,
+                tag=tag,
+                tmp_dir=tmp_dir,
+            )
         finally:
             if tmp_dir.exists():
                 try:

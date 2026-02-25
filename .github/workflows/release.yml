@@ -22,8 +22,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cgp-linux-x86_64.tar.gz
-          path: out/cgp-linux-x86_64.tar.gz
+          name: linux-x86_64-archives
+          path: |
+            out/cgp-linux-x86_64.tar.gz
+            out/cgp-app-linux-x86_64.tar.gz
+            out/cgp-runtime-linux-x86_64.tar.gz
 
   build-linux-arm64:
     runs-on: ubuntu-latest
@@ -45,8 +48,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cgp-linux-arm64.tar.gz
-          path: out/cgp-linux-arm64.tar.gz
+          name: linux-arm64-archives
+          path: |
+            out/cgp-linux-arm64.tar.gz
+            out/cgp-app-linux-arm64.tar.gz
+            out/cgp-runtime-linux-arm64.tar.gz
 
   build-macos-x86_64:
     runs-on: macos-15-intel
@@ -64,12 +70,15 @@ jobs:
           python -m PyInstaller --clean -n cgp --collect-data certifi \
             --specpath out/_spec --distpath out/_dist --workpath out/_build \
             cursor_gui_patch/__main__.py
-          tar -C out/_dist -czf out/cgp-macos-x86_64.tar.gz cgp
+          python scripts/post_build.py out/_dist out macos-x86_64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cgp-macos-x86_64.tar.gz
-          path: out/cgp-macos-x86_64.tar.gz
+          name: macos-x86_64-archives
+          path: |
+            out/cgp-macos-x86_64.tar.gz
+            out/cgp-app-macos-x86_64.tar.gz
+            out/cgp-runtime-macos-x86_64.tar.gz
 
   build-macos-arm64:
     runs-on: macos-latest
@@ -87,12 +96,15 @@ jobs:
           python -m PyInstaller --clean -n cgp --collect-data certifi \
             --specpath out/_spec --distpath out/_dist --workpath out/_build \
             cursor_gui_patch/__main__.py
-          tar -C out/_dist -czf out/cgp-macos-arm64.tar.gz cgp
+          python scripts/post_build.py out/_dist out macos-arm64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cgp-macos-arm64.tar.gz
-          path: out/cgp-macos-arm64.tar.gz
+          name: macos-arm64-archives
+          path: |
+            out/cgp-macos-arm64.tar.gz
+            out/cgp-app-macos-arm64.tar.gz
+            out/cgp-runtime-macos-arm64.tar.gz
 
   build-windows-x86_64:
     runs-on: windows-latest
@@ -110,12 +122,15 @@ jobs:
           python -m PyInstaller --clean -n cgp --collect-data certifi `
             --specpath out/_spec --distpath out/_dist --workpath out/_build `
             cursor_gui_patch/__main__.py
-          Compress-Archive -Path out/_dist/cgp -DestinationPath out/cgp-windows-x86_64.zip
+          python scripts/post_build.py out/_dist out windows-x86_64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cgp-windows-x86_64.zip
-          path: out/cgp-windows-x86_64.zip
+          name: windows-x86_64-archives
+          path: |
+            out/cgp-windows-x86_64.zip
+            out/cgp-app-windows-x86_64.zip
+            out/cgp-runtime-windows-x86_64.zip
 
   smoke-test:
     runs-on: ${{ matrix.os }}
@@ -127,16 +142,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, asset: "cgp-linux-x86_64.tar.gz", exe: "cgp/cgp" }
-          - { os: macos-latest, asset: "cgp-macos-arm64.tar.gz", exe: "cgp/cgp" }
-          - { os: windows-latest, asset: "cgp-windows-x86_64.zip", exe: "cgp/cgp.exe" }
+          - { os: ubuntu-latest, artifact: "linux-x86_64-archives", asset: "cgp-linux-x86_64.tar.gz", exe: "cgp/cgp" }
+          - { os: macos-latest, artifact: "macos-arm64-archives", asset: "cgp-macos-arm64.tar.gz", exe: "cgp/cgp" }
+          - { os: windows-latest, artifact: "windows-x86_64-archives", asset: "cgp-windows-x86_64.zip", exe: "cgp/cgp.exe" }
     steps:
       - uses: actions/checkout@v4
 
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ matrix.asset }}
+          name: ${{ matrix.artifact }}
           path: dist
 
       - name: Extract and smoke test (Unix)
@@ -148,6 +163,9 @@ jobs:
           chmod +x "${{ matrix.exe }}"
           ./${{ matrix.exe }} --version
           ./${{ matrix.exe }} status || true
+          # Verify RUNTIME_VERSION file exists
+          test -f cgp/_internal/RUNTIME_VERSION
+          echo "RUNTIME_VERSION: $(cat cgp/_internal/RUNTIME_VERSION)"
 
       - name: Extract and smoke test (Windows)
         if: runner.os == 'Windows'
@@ -157,6 +175,45 @@ jobs:
           Expand-Archive -Path "${{ matrix.asset }}" -DestinationPath . -Force
           & ".\${{ matrix.exe }}" --version
           & ".\${{ matrix.exe }}" status
+          # Verify RUNTIME_VERSION file exists
+          if (!(Test-Path "cgp\_internal\RUNTIME_VERSION")) { throw "RUNTIME_VERSION missing" }
+          Get-Content "cgp\_internal\RUNTIME_VERSION"
+
+  smoke-test-source:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Test source package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euxo pipefail
+          tar -czf cgp-src.tar.gz --exclude='__pycache__' -C . cursor_gui_patch
+          mkdir test-src && cd test-src
+          tar -xzf ../cgp-src.tar.gz
+          python -m cursor_gui_patch --version
+          python -m cursor_gui_patch status || true
+
+      - name: Test source package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          tar -czf cgp-src.tar.gz --exclude='__pycache__' -C . cursor_gui_patch
+          New-Item -ItemType Directory -Force -Path test-src | Out-Null
+          cd test-src
+          tar -xzf ../cgp-src.tar.gz
+          python -m cursor_gui_patch --version
+          python -m cursor_gui_patch status
 
   smoke-install:
     runs-on: ubuntu-latest
@@ -168,13 +225,13 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: cgp-linux-x86_64.tar.gz
+          name: linux-x86_64-archives
           path: dist
 
       - name: Prepare checksums
         run: |
           cd dist
-          sha256sum cgp-linux-x86_64.tar.gz > checksums.txt
+          sha256sum cgp-*.tar.gz > checksums.txt
 
       - name: Test install script (offline)
         run: |
@@ -197,19 +254,44 @@ jobs:
       - build-macos-arm64
       - build-windows-x86_64
       - smoke-test
+      - smoke-test-source
       - smoke-install
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Create source package
+        run: |
+          set -euxo pipefail
+          tar -czf cgp-src.tar.gz --exclude='__pycache__' -C . cursor_gui_patch
+          mv cgp-src.tar.gz /tmp/cgp-src.tar.gz
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Prepare checksums.txt
+      - name: Extract runtime version and prepare checksums
         run: |
           set -euxo pipefail
+
+          # Move source package into dist
+          cp /tmp/cgp-src.tar.gz dist/cgp-src.tar.gz
+
           cd dist
+
+          # Extract runtime version from one of the full bundles
+          # (all platforms share the same runtime version hash format)
+          mkdir -p /tmp/rv-check
+          tar -xzf cgp-linux-x86_64.tar.gz -C /tmp/rv-check cgp/_internal/RUNTIME_VERSION 2>/dev/null || true
+          if [ -f /tmp/rv-check/cgp/_internal/RUNTIME_VERSION ]; then
+            cp /tmp/rv-check/cgp/_internal/RUNTIME_VERSION runtime_version.txt
+            echo "Runtime version: $(cat runtime_version.txt)"
+          fi
+
+          # Checksums for all release assets
+          sha256sum cgp-*.tar.gz cgp-*.zip runtime_version.txt 2>/dev/null > checksums.txt || \
           sha256sum cgp-*.tar.gz cgp-*.zip > checksums.txt
           ls -la
 
@@ -219,5 +301,6 @@ jobs:
           files: |
             dist/cgp-*
             dist/checksums.txt
+            dist/runtime_version.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

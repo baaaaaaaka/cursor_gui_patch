@@ -13,11 +13,11 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 case "${ARCH}" in
   x86_64)
     PLATFORM="linux/amd64"
-    ASSET_NAME="cgp-linux-x86_64.tar.gz"
+    CGP_PLATFORM="linux-x86_64"
     ;;
   arm64)
     PLATFORM="linux/arm64"
-    ASSET_NAME="cgp-linux-arm64.tar.gz"
+    CGP_PLATFORM="linux-arm64"
     ;;
   *)
     echo "Unsupported arch: ${ARCH}" >&2
@@ -47,8 +47,10 @@ docker run --rm \
     python -m PyInstaller --clean -n cgp --collect-data certifi \
       --specpath /tmp/_spec --distpath /tmp/_dist --workpath /tmp/_build \
       cursor_gui_patch/__main__.py
-    tar -C /tmp/_dist -czf /out/${ASSET_NAME} cgp
-    echo 'Built /out/${ASSET_NAME}'
+    # Post-build: strip, create RUNTIME_VERSION, package split archives
+    python scripts/post_build.py /tmp/_dist /out ${CGP_PLATFORM}
+    echo 'Built archives for ${CGP_PLATFORM}'
   "
 
-echo "Output: ${OUT_DIR}/${ASSET_NAME}"
+echo "Output: ${OUT_DIR}/"
+ls -lh "${OUT_DIR}"/cgp*"${CGP_PLATFORM}"* 2>/dev/null || true

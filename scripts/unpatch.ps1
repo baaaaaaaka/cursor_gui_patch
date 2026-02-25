@@ -1,21 +1,101 @@
 # One-click unpatch for Cursor (Windows, no persistent install).
 #
+# Priority: 1) cgp on PATH  2) Python 3.9+ (source)  3) platform binary
+#
 # Usage:
 #   irm https://raw.githubusercontent.com/baaaaaaaka/cursor_gui_patch/main/scripts/unpatch.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 $Repo = if ($env:CGP_GITHUB_REPO) { $env:CGP_GITHUB_REPO } else { "baaaaaaaka/cursor_gui_patch" }
 
-# If cgp is already on PATH, use it directly.
+# --- Helpers ---
+
+function Find-Python39 {
+    foreach ($cmd in @("py", "python3", "python")) {
+        try {
+            if ($cmd -eq "py") {
+                $result = & py -3 -c "import sys; print('OK' if sys.version_info >= (3,9) else 'NO')" 2>$null
+            } else {
+                $result = & $cmd -c "import sys; print('OK' if sys.version_info >= (3,9) else 'NO')" 2>$null
+            }
+            if ($result -eq "OK") {
+                if ($cmd -eq "py") { return @("py", "-3") }
+                return @($cmd)
+            }
+        } catch {}
+    }
+    return $null
+}
+
+function Invoke-PythonCmd {
+    param([string[]]$PyCmds, [string[]]$Arguments)
+    $allArgs = @($PyCmds | Select-Object -Skip 1) + $Arguments
+    & $PyCmds[0] $allArgs
+}
+
+# --- Priority 1: cgp already on PATH ---
+
 $ExistingCgp = Get-Command cgp -ErrorAction SilentlyContinue
 if ($ExistingCgp) {
-    Write-Host "Running: cgp unpatch"
+    Write-Host "Running: cgp unpatch (from PATH)"
     Write-Host "---"
     & cgp unpatch
+    $ExitCode = $LASTEXITCODE
     Write-Host "---"
+    if ($ExitCode -ne 0) {
+        Write-Host ""
+        Write-Host "Unpatch failed (exit code $ExitCode)."
+    }
     Read-Host -Prompt "Press Enter to close"
-    exit $LASTEXITCODE
+    exit $ExitCode
 }
+
+# --- Priority 2: Python 3.9+ source mode ---
+
+$PyCmds = Find-Python39
+if ($PyCmds) {
+    $TmpDir = Join-Path $env:TEMP "cgp-oneshot-$(Get-Random)"
+    New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+
+    try {
+        $SrcAsset = "cgp-src.tar.gz"
+        $Url = "https://github.com/$Repo/releases/latest/download/$SrcAsset"
+        $SrcPath = Join-Path $TmpDir $SrcAsset
+
+        Write-Host "Python 3.9+ found. Downloading source package ($SrcAsset)..."
+        Invoke-WebRequest -Uri $Url -OutFile $SrcPath -UseBasicParsing
+
+        Write-Host "Extracting..."
+        # Use Python's tarfile (tar may not be available on all Windows)
+        # Pass paths via sys.argv to avoid quoting issues; use filter='data' on 3.12+ to suppress DeprecationWarning
+        Invoke-PythonCmd -PyCmds $PyCmds -Arguments @("-c", "import sys,tarfile;t=tarfile.open(sys.argv[1]);t.extractall(sys.argv[2],**({'filter':'data'}if hasattr(tarfile,'data_filter')else{}));t.close()", $SrcPath, $TmpDir)
+
+        Write-Host ""
+        Write-Host "Running: python -m cursor_gui_patch unpatch"
+        Write-Host "---"
+
+        Push-Location $TmpDir
+        try {
+            Invoke-PythonCmd -PyCmds $PyCmds -Arguments @("-m", "cursor_gui_patch", "unpatch")
+            $ExitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+
+        Write-Host "---"
+        if ($ExitCode -ne 0) {
+            Write-Host ""
+            Write-Host "Unpatch failed (exit code $ExitCode)."
+        }
+    } finally {
+        Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
+    }
+
+    Read-Host -Prompt "Press Enter to close"
+    exit $ExitCode
+}
+
+# --- Priority 3: Platform binary fallback ---
 
 $Asset = "cgp-windows-x86_64.zip"
 $TmpDir = Join-Path $env:TEMP "cgp-oneshot-$(Get-Random)"
@@ -25,7 +105,7 @@ try {
     $Url = "https://github.com/$Repo/releases/latest/download/$Asset"
     $ZipPath = Join-Path $TmpDir $Asset
 
-    Write-Host "Downloading cgp ($Asset)..."
+    Write-Host "Downloading cgp binary ($Asset)..."
     Invoke-WebRequest -Uri $Url -OutFile $ZipPath -UseBasicParsing
 
     Write-Host "Extracting..."

@@ -20,12 +20,16 @@ from cursor_gui_patch.github_release import (
     _parse_version_tuple,
     build_checksums_download_url,
     build_release_download_url,
+    download_and_install_app_only,
     download_and_install_release_bundle,
     fetch_latest_release,
     is_frozen_binary,
     is_version_newer,
     parse_checksums_txt,
+    read_runtime_version_from,
+    select_app_asset_name,
     select_release_asset_name,
+    select_runtime_asset_name,
     split_repo,
 )
 
@@ -120,6 +124,25 @@ class TestSelectAssetName:
     def test_unsupported_arch(self):
         with pytest.raises(RuntimeError, match="Unsupported"):
             select_release_asset_name(system="Linux", machine="riscv64")
+
+
+class TestSelectAppAssetName:
+    def test_linux_x86_64(self):
+        assert select_app_asset_name(system="Linux", machine="x86_64") == "cgp-app-linux-x86_64.tar.gz"
+
+    def test_macos_arm64(self):
+        assert select_app_asset_name(system="Darwin", machine="arm64") == "cgp-app-macos-arm64.tar.gz"
+
+    def test_windows_x86_64(self):
+        assert select_app_asset_name(system="Windows", machine="AMD64") == "cgp-app-windows-x86_64.zip"
+
+
+class TestSelectRuntimeAssetName:
+    def test_linux_x86_64(self):
+        assert select_runtime_asset_name(system="Linux", machine="x86_64") == "cgp-runtime-linux-x86_64.tar.gz"
+
+    def test_windows_x86_64(self):
+        assert select_runtime_asset_name(system="Windows", machine="AMD64") == "cgp-runtime-windows-x86_64.zip"
 
 
 class TestFetchLatestRelease:
@@ -257,5 +280,99 @@ class TestDownloadAndInstallBundle:
                 asset_name="cgp-linux-x86_64.deb",
                 install_root=tmp_path / "root",
                 bin_dir=tmp_path / "bin",
+                verify_checksums=False,
+            )
+
+
+class TestRuntimeVersion:
+    def test_read_existing(self, tmp_path: Path):
+        internal = tmp_path / "_internal"
+        internal.mkdir()
+        (internal / "RUNTIME_VERSION").write_text("abc123\n", encoding="utf-8")
+        assert read_runtime_version_from(internal) == "abc123"
+
+    def test_read_missing(self, tmp_path: Path):
+        assert read_runtime_version_from(tmp_path / "nonexistent") is None
+
+    def test_read_no_file(self, tmp_path: Path):
+        internal = tmp_path / "_internal"
+        internal.mkdir()
+        assert read_runtime_version_from(internal) is None
+
+
+class TestDownloadAndInstallAppOnly:
+    def _make_app_tar_gz(self, exe_name: str = "cgp") -> bytes:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            content = b"#!/bin/sh\necho ok v2"
+            info = tarfile.TarInfo(name=f"cgp/{exe_name}")
+            info.size = len(content)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(content))
+        return buf.getvalue()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks require elevated privileges on Windows")
+    def test_app_only_install_with_symlink(self, tmp_path: Path):
+        """App-only install should reuse existing _internal/ via symlink."""
+        # Set up existing _internal/ with some content
+        existing_internal = tmp_path / "old_version" / "cgp" / "_internal"
+        existing_internal.mkdir(parents=True)
+        (existing_internal / "libpython.so").write_bytes(b"fake lib")
+        (existing_internal / "RUNTIME_VERSION").write_text("abc123\n", encoding="utf-8")
+
+        data = self._make_app_tar_gz()
+
+        def fake_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+            if "checksums.txt" in url:
+                raise Exception("no checksums")
+            return data
+
+        install_root = tmp_path / "root"
+        bin_dir = tmp_path / "bin"
+
+        result = download_and_install_app_only(
+            repo="owner/repo",
+            tag="v0.2.0",
+            app_asset_name="cgp-app-linux-x86_64.tar.gz",
+            existing_internal=existing_internal,
+            install_root=install_root,
+            bin_dir=bin_dir,
+            fetch=fake_fetch,
+            verify_checksums=False,
+        )
+
+        # Verify the new version directory exists
+        new_version_dir = install_root / "versions" / "v0.2.0"
+        assert new_version_dir.exists()
+
+        # Verify the executable exists
+        assert (new_version_dir / "cgp" / "cgp").exists()
+
+        # Verify _internal/ is a symlink to the existing one
+        new_internal = new_version_dir / "cgp" / "_internal"
+        assert new_internal.is_symlink()
+        assert (new_internal / "libpython.so").read_bytes() == b"fake lib"
+        assert (new_internal / "RUNTIME_VERSION").read_text(encoding="utf-8").strip() == "abc123"
+
+        # Verify symlinks
+        assert (install_root / "current").is_symlink()
+        assert (bin_dir / "cgp").is_symlink()
+
+    def test_app_only_missing_internal(self, tmp_path: Path):
+        """Should fail if existing _internal/ doesn't exist."""
+        data = self._make_app_tar_gz()
+
+        def fake_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+            return data
+
+        with pytest.raises(RuntimeError, match="existing _internal/ not found"):
+            download_and_install_app_only(
+                repo="owner/repo",
+                tag="v0.2.0",
+                app_asset_name="cgp-app-linux-x86_64.tar.gz",
+                existing_internal=tmp_path / "nonexistent",
+                install_root=tmp_path / "root",
+                bin_dir=tmp_path / "bin",
+                fetch=fake_fetch,
                 verify_checksums=False,
             )
