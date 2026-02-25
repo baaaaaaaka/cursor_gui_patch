@@ -45,9 +45,9 @@ jobs:
 
           echo "Cursor latest: $version ($commit)"
 
-          # Check if already tested.
-          if grep -q "^${version} " scripts/cursor_tested_versions.txt 2>/dev/null; then
-            echo "Version $version already tested."
+          # Check if already tested successfully (skip only if status is "pass").
+          if grep -q "^${version} .* pass$" scripts/cursor_tested_versions.txt 2>/dev/null; then
+            echo "Version $version already tested and passed."
             echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -125,9 +125,9 @@ jobs:
 
                   print(f"  Extracted to: {server_dir.name}")
 
-                  # Run dry-run patch.
+                  # Run dry-run patch (--server-dir is a global arg, must come before subcommand).
                   proc = subprocess.run(
-                      [sys.executable, "-m", "cursor_gui_patch", "patch", "--dry-run", "--server-dir", str(server_dir)],
+                      [sys.executable, "-m", "cursor_gui_patch", "--server-dir", str(server_dir), "patch", "--dry-run"],
                       capture_output=True, text=True,
                   )
                   print(f"  Exit code: {proc.returncode}")
