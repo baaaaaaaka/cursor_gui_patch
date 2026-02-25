@@ -9,23 +9,14 @@ from .base import BasePatch, PatchResult
 
 _MARKER = "CGP_PATCH_AUTORUN_DISABLED"
 
-# Pattern 1: Method implementation
-# Matches: async getAutoRunControls(){const e=await this.getTeamAdminSettings();if(e?.autoRunControls?.enabled)return{...}}
-# The method body reads team settings and returns auto-run config; we replace
-# the entire method to return void 0 (undefined).
-_RE_METHOD_IMPL = re.compile(
-    r"async\s+getAutoRunControls\s*\(\s*\)\s*\{"
-    r"const\s+\w+=await\s+this\.getTeamAdminSettings\(\);"
-    r"if\(\w+\?\.autoRunControls\?\.enabled\)"
-    r"return\{[^}]*\}"
-    r"\}"
-)
-
-# Pattern 2: Call sites
-# Matches: this.teamSettingsService.getAutoRunControls()
-# (possibly with await prefix, captured separately)
-_RE_CALL_SITE = re.compile(
-    r"this\.teamSettingsService\.getAutoRunControls\s*\(\s*\)"
+# Minimal injection: match the method opening and inject an early return.
+# Matches: async getAutoRunControls(){
+# We inject: return void 0/* marker */; right after the opening brace.
+# The rest of the method body is left intact (unreachable but valid JS).
+# This is safer than replacing the entire method body because it preserves
+# the file structure and avoids subtle issues with brace matching.
+_RE_METHOD_OPEN = re.compile(
+    r"(async\s+getAutoRunControls\s*\(\s*\)\s*\{)"
 )
 
 
@@ -39,10 +30,7 @@ class AutoRunPatch(BasePatch):
         return _MARKER
 
     def is_applicable(self, content: str) -> bool:
-        return (
-            "getAutoRunControls" in content
-            and "teamSettingsService" in content
-        )
+        return "getAutoRunControls" in content and _RE_METHOD_OPEN.search(content) is not None
 
     def apply(self, content: str) -> Tuple[str, PatchResult]:
         result = PatchResult()
@@ -56,28 +44,20 @@ class AutoRunPatch(BasePatch):
             result.not_applicable = True
             return content, result
 
-        new_content = content
-        total_replacements = 0
+        # Inject early return right after the method opening brace.
+        # Original: async getAutoRunControls(){const e=...
+        # Patched:  async getAutoRunControls(){return void 0/* CGP_PATCH_AUTORUN_DISABLED */;const e=...
+        injection = f"return void 0/* {_MARKER} */;"
+        new_content, n = _RE_METHOD_OPEN.subn(
+            lambda m: m.group(1) + injection,
+            content,
+        )
 
-        # Replacement 1: Method implementation → return void 0
-        method_replacement = f"async getAutoRunControls(){{return void 0/* {_MARKER} */}}"
-        new_content, n = _RE_METHOD_IMPL.subn(method_replacement, new_content)
-        total_replacements += n
-        if n:
-            result.details.append(f"Replaced {n} method implementation(s)")
-
-        # Replacement 2: Call sites → Promise.resolve(void 0)
-        call_replacement = f"Promise.resolve(void 0)/* {_MARKER} */"
-        new_content, n = _RE_CALL_SITE.subn(call_replacement, new_content)
-        total_replacements += n
-        if n:
-            result.details.append(f"Replaced {n} call site(s)")
-
-        if total_replacements > 0:
+        if n > 0:
             result.applied = True
-            result.replacements = total_replacements
+            result.replacements = n
+            result.details.append(f"Injected early return in {n} method(s)")
         else:
-            # Patterns exist but regexes didn't match — treat as not applicable
             result.not_applicable = True
 
         return new_content, result

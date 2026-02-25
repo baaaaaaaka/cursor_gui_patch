@@ -133,9 +133,10 @@ def _patch_target(
 
     report.scanned += 1
 
-    # Read file
+    # Read file (binary mode to preserve exact bytes — avoids Windows text-mode
+    # converting \n to \r\n on write).
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = path.read_bytes().decode("utf-8", errors="replace")
     except Exception as e:
         report.errors.append((path, f"read failed: {e}"))
         return
@@ -200,7 +201,7 @@ def _patch_target(
             st = None
 
     try:
-        path.write_text(new_content, encoding="utf-8")
+        path.write_bytes(new_content.encode("utf-8"))
         # Preserve permissions
         if st is not None:
             try:
@@ -307,7 +308,7 @@ def status(
             )
 
             try:
-                content = target.path.read_text(encoding="utf-8", errors="replace")
+                content = target.path.read_bytes().decode("utf-8", errors="replace")
             except Exception as e:
                 fs.error = f"read failed: {e}"
                 report.files.append(fs)

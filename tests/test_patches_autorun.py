@@ -42,28 +42,32 @@ class TestAutoRunPatch(unittest.TestCase):
     def test_is_applicable_false(self):
         self.assertFalse(self.patch.is_applicable("some random code"))
 
-    def test_is_applicable_partial(self):
-        # Has getAutoRunControls but not teamSettingsService
+    def test_is_applicable_needs_method(self):
+        # Has getAutoRunControls as a string but no method definition
         self.assertFalse(self.patch.is_applicable("getAutoRunControls"))
 
-    def test_apply_replaces_method(self):
+    def test_apply_injects_early_return(self):
         new_content, result = self.patch.apply(SAMPLE_FULL)
         self.assertTrue(result.applied)
         self.assertIn("CGP_PATCH_AUTORUN_DISABLED", new_content)
-        self.assertIn("async getAutoRunControls(){return void 0", new_content)
-        # Original method body should be gone
-        self.assertNotIn("getTeamAdminSettings", new_content)
+        # The method should have an early return injected
+        self.assertIn(
+            "async getAutoRunControls(){return void 0/* CGP_PATCH_AUTORUN_DISABLED */;",
+            new_content,
+        )
+        # Original method body is preserved (unreachable but still present)
+        self.assertIn("getTeamAdminSettings", new_content)
 
-    def test_apply_replaces_call_sites(self):
+    def test_apply_preserves_call_sites(self):
+        """New approach: call sites are NOT modified."""
         new_content, result = self.patch.apply(SAMPLE_FULL)
         self.assertTrue(result.applied)
-        self.assertIn("Promise.resolve(void 0)", new_content)
-        # Original call sites should be gone
-        self.assertNotIn("this.teamSettingsService.getAutoRunControls()", new_content)
+        # Call sites should remain untouched
+        self.assertIn("this.teamSettingsService.getAutoRunControls()", new_content)
 
     def test_apply_replacement_count(self):
         new_content, result = self.patch.apply(SAMPLE_FULL)
-        self.assertEqual(result.replacements, 3)  # 1 method + 2 call sites
+        self.assertEqual(result.replacements, 1)  # 1 method injection only
 
     def test_idempotent(self):
         new_content, result1 = self.patch.apply(SAMPLE_FULL)
@@ -84,11 +88,16 @@ class TestAutoRunPatch(unittest.TestCase):
     def test_method_only(self):
         """Test with just the method, no call sites."""
         content = f"prefix;{SAMPLE_METHOD};suffix"
-        # Add teamSettingsService reference to make is_applicable work
-        content += ";this.teamSettingsService.foo()"
         new_content, result = self.patch.apply(content)
         self.assertTrue(result.applied)
         self.assertEqual(result.replacements, 1)
+
+    def test_minimal_change(self):
+        """The patch should only add bytes, not remove any."""
+        new_content, result = self.patch.apply(SAMPLE_FULL)
+        self.assertTrue(result.applied)
+        # Patched content should be longer (we injected, not replaced)
+        self.assertGreater(len(new_content), len(SAMPLE_FULL))
 
 
 if __name__ == "__main__":
