@@ -6,8 +6,11 @@ set -euo pipefail
 # Output (key=value):
 #   version=<cursor_version>
 #   commit=<commit_hash>
-#
-# Tries multiple sources to find the latest Cursor version.
+#   reh_url_linux_x64=<url>
+#   reh_url_linux_arm64=<url>
+#   reh_url_darwin_x64=<url>
+#   reh_url_darwin_arm64=<url>
+#   reh_url_win32_x64=<url>
 
 fetch_text() {
   local url="$1"
@@ -22,25 +25,39 @@ fetch_text() {
   return 1
 }
 
-# Try the Cursor update API.
-try_update_api() {
+# Primary: Cursor download API (returns version, commitSha, rehUrl).
+try_download_api() {
   local resp
-  resp="$(fetch_text "https://api2.cursor.sh/updates/api/update/linux-x64/stable/latest" 2>/dev/null || true)"
+  resp="$(fetch_text "https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable" 2>/dev/null || true)"
   if [ -z "$resp" ]; then return 1; fi
 
   local version commit
-  version="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('productVersion',''))" 2>/dev/null || true)"
-  commit="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('version',''))" 2>/dev/null || true)"
+  version="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('version',''))" 2>/dev/null || true)"
+  commit="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('commitSha',''))" 2>/dev/null || true)"
 
-  if [ -n "$version" ] && [ -n "$commit" ]; then
-    echo "version=$version"
-    echo "commit=$commit"
-    return 0
-  fi
-  return 1
+  if [ -z "$version" ] || [ -z "$commit" ]; then return 1; fi
+
+  echo "version=$version"
+  echo "commit=$commit"
+
+  # Fetch rehUrl for each platform.
+  for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+    local key="reh_url_$(printf '%s' "$platform" | tr '-' '_')"
+    local pdata
+    pdata="$(fetch_text "https://www.cursor.com/api/download?platform=${platform}&releaseTrack=stable" 2>/dev/null || true)"
+    if [ -n "$pdata" ]; then
+      local reh_url
+      reh_url="$(printf '%s' "$pdata" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rehUrl',''))" 2>/dev/null || true)"
+      if [ -n "$reh_url" ]; then
+        echo "${key}=${reh_url}"
+      fi
+    fi
+  done
+
+  return 0
 }
 
-if try_update_api; then
+if try_download_api; then
   exit 0
 fi
 

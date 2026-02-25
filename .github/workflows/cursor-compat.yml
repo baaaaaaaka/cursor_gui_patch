@@ -26,25 +26,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Get latest Cursor version info.
-          if ! info="$(bash scripts/cursor_release_info.sh)"; then
-            echo "Failed to get Cursor release info" >&2
+          # Get latest Cursor version info via download API.
+          resp="$(curl -fsSL "https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable" 2>/dev/null || true)"
+          if [ -z "$resp" ]; then
+            echo "Failed to fetch Cursor release info" >&2
             exit 1
           fi
-          version="$(printf "%s\n" "$info" | awk -F= '/^version=/{print $2}')"
-          commit="$(printf "%s\n" "$info" | awk -F= '/^commit=/{print $2}')"
+
+          version="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('version',''))")"
+          commit="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('commitSha',''))")"
+          reh_url="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rehUrl',''))")"
+
           if [ -z "$version" ] || [ -z "$commit" ]; then
             echo "Could not parse Cursor version info" >&2
             echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          echo "Cursor latest: $version ($commit)"
+
           # Check if already tested.
           if grep -q "^${version} " scripts/cursor_tested_versions.txt 2>/dev/null; then
             echo "Version $version already tested."
             echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "missing_versions=[{\"version\":\"$version\",\"commit\":\"$commit\"}]" >> "$GITHUB_OUTPUT"
+
+          echo "missing_versions=[{\"version\":\"$version\",\"commit\":\"$commit\",\"reh_url\":\"$reh_url\"}]" >> "$GITHUB_OUTPUT"
 
   test:
     name: Test patch on Cursor ${{ fromJSON(needs.detect.outputs.missing_versions)[0].version }}
@@ -59,7 +67,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install cgp
-        run: pip install -e .
+        run: pip install -e . pytest
 
       - name: Test patch against new Cursor version
         shell: bash
@@ -82,15 +90,19 @@ jobs:
           for entry in versions:
               version = entry["version"]
               commit = entry["commit"]
+              reh_url = entry.get("reh_url", "")
 
-              # Download Cursor Server for linux-x64.
-              url = f"https://cursor.blob.core.windows.net/remote-releases/{commit}/vscode-reh-linux-x64.tar.gz"
+              # Use the rehUrl from the API directly (commit in rehUrl may differ from commitSha).
+              if not reh_url:
+                  reh_url = f"https://cursor.blob.core.windows.net/remote-releases/{commit}/vscode-reh-linux-x64.tar.gz"
+
               print(f"Downloading Cursor Server {version} ({commit[:8]})...")
+              print(f"  URL: {reh_url}")
 
               with tempfile.TemporaryDirectory() as tmpdir:
                   archive = Path(tmpdir) / "server.tar.gz"
                   try:
-                      urllib.request.urlretrieve(url, str(archive))
+                      urllib.request.urlretrieve(reh_url, str(archive))
                   except Exception as e:
                       print(f"  Download failed: {e}")
                       results[version] = {"commit": commit, "status": "download_failed"}
@@ -99,7 +111,7 @@ jobs:
                   # Extract.
                   subprocess.run(["tar", "-xzf", str(archive), "-C", tmpdir], check=True)
 
-                  # Find the server dir.
+                  # Find the server dir (usually "vscode-reh-linux-x64" or similar).
                   server_dir = None
                   for d in Path(tmpdir).iterdir():
                       if d.is_dir() and d.name != "server.tar.gz":
@@ -110,6 +122,8 @@ jobs:
                       print(f"  Could not find server directory after extraction")
                       results[version] = {"commit": commit, "status": "extract_failed"}
                       continue
+
+                  print(f"  Extracted to: {server_dir.name}")
 
                   # Run dry-run patch.
                   proc = subprocess.run(
