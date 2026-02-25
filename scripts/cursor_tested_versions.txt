@@ -1,0 +1,2 @@
+# Cursor versions that have been tested with cgp
+# Format: cursor_version commit_hash date status

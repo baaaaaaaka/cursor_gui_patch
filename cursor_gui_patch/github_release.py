@@ -1,0 +1,506 @@
+"""GitHub Release API helpers for downloading and installing cgp bundles."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import platform
+import shutil
+import ssl
+import stat
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, Optional, Tuple
+
+
+ENV_CGP_GITHUB_REPO = "CGP_GITHUB_REPO"
+DEFAULT_GITHUB_REPO = "baaaaaaaka/cursor_gui_patch"
+ENV_CGP_INSTALL_DEST = "CGP_INSTALL_DEST"
+ENV_CGP_INSTALL_ROOT = "CGP_INSTALL_ROOT"
+
+Fetch = Callable[[str, float, Dict[str, str]], bytes]
+
+
+def _looks_like_cert_verify_error(err: BaseException) -> bool:
+    if isinstance(err, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(err, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(err):
+        return True
+    if isinstance(err, urllib.error.URLError):
+        r = err.reason
+        if isinstance(r, BaseException):
+            return _looks_like_cert_verify_error(r)
+        return "CERTIFICATE_VERIFY_FAILED" in str(r)
+    return "CERTIFICATE_VERIFY_FAILED" in str(err)
+
+
+def _bundled_cafile() -> Optional[str]:
+    if not is_frozen_binary():
+        return None
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return None
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        p = certifi.where()
+        if isinstance(p, str) and p:
+            pp = Path(p)
+            if pp.exists():
+                return str(pp)
+    except Exception:
+        pass
+    try:
+        mp = getattr(sys, "_MEIPASS", None)
+        if isinstance(mp, str) and mp:
+            cand = Path(mp) / "cacert.pem"
+            if cand.exists():
+                return str(cand)
+    except Exception:
+        pass
+    try:
+        cand2 = Path(sys.executable).resolve().parent / "cacert.pem"
+        if cand2.exists():
+            return str(cand2)
+    except Exception:
+        pass
+    return None
+
+
+def _default_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            return resp.read()
+    except Exception as e:
+        cafile = _bundled_cafile()
+        if not cafile:
+            raise
+        if not _looks_like_cert_verify_error(e):
+            raise
+        ctx = ssl.create_default_context(cafile=cafile)
+        with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
+            return resp.read()
+
+
+def _http_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": "cursor-gui-patch",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def is_frozen_binary() -> bool:
+    """Detect PyInstaller frozen binary."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def get_github_repo() -> str:
+    v = os.environ.get(ENV_CGP_GITHUB_REPO)
+    return v.strip() if isinstance(v, str) and v.strip() else DEFAULT_GITHUB_REPO
+
+
+def default_install_bin_dir() -> Path:
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", "")) / "cgp"
+    return Path.home() / ".local" / "bin"
+
+
+def default_install_root_dir() -> Path:
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", "")) / "cgp"
+    return Path.home() / ".local" / "lib" / "cgp"
+
+
+def get_install_bin_dir() -> Path:
+    v = os.environ.get(ENV_CGP_INSTALL_DEST)
+    if isinstance(v, str) and v.strip():
+        return Path(v).expanduser()
+    return default_install_bin_dir()
+
+
+def get_install_root_dir() -> Path:
+    v = os.environ.get(ENV_CGP_INSTALL_ROOT)
+    if isinstance(v, str) and v.strip():
+        return Path(v).expanduser()
+    return default_install_root_dir()
+
+
+def split_repo(repo: str) -> Tuple[str, str]:
+    s = (repo or "").strip()
+    if not s or "/" not in s:
+        raise ValueError(f"Invalid GitHub repo: {repo!r} (expected 'owner/name').")
+    owner, name = s.split("/", 1)
+    owner = owner.strip()
+    name = name.strip()
+    if not owner or not name:
+        raise ValueError(f"Invalid GitHub repo: {repo!r} (expected 'owner/name').")
+    return owner, name
+
+
+def _parse_version_tuple(v: str) -> Optional[Tuple[int, ...]]:
+    s = (v or "").strip()
+    if not s:
+        return None
+    if s.startswith("v") and len(s) > 1:
+        s = s[1:]
+    parts = s.split(".")
+    out = []
+    for p in parts:
+        digits = ""
+        for ch in p:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits == "":
+            break
+        out.append(int(digits))
+    return tuple(out) if out else None
+
+
+def is_version_newer(remote: str, local: str) -> Optional[bool]:
+    """Compare semantic versions. Returns True if remote > local, None if unparseable."""
+    rv = _parse_version_tuple(remote)
+    lv = _parse_version_tuple(local)
+    if not rv or not lv:
+        return None
+    n = max(len(rv), len(lv))
+    rv2 = rv + (0,) * (n - len(rv))
+    lv2 = lv + (0,) * (n - len(lv))
+    return rv2 > lv2
+
+
+@dataclass(frozen=True)
+class ReleaseInfo:
+    tag: str
+    version: str
+
+
+def fetch_latest_release(
+    repo: str,
+    *,
+    timeout_s: float = 2.0,
+    fetch: Fetch = _default_fetch,
+) -> ReleaseInfo:
+    owner, name = split_repo(repo)
+    url = f"https://api.github.com/repos/{owner}/{name}/releases/latest"
+    raw = fetch(url, timeout_s, _http_headers())
+    obj = json.loads(raw.decode("utf-8", "replace"))
+    if not isinstance(obj, dict):
+        raise ValueError("unexpected GitHub API response shape")
+    tag = obj.get("tag_name")
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("missing tag_name in GitHub API response")
+    tag = tag.strip()
+    ver = tag[1:] if tag.startswith("v") else tag
+    return ReleaseInfo(tag=tag, version=ver)
+
+
+def _normalize_arch(machine: str) -> str:
+    m = (machine or "").lower()
+    if m in ("x86_64", "amd64"):
+        return "x86_64"
+    if m in ("aarch64", "arm64"):
+        return "arm64"
+    return m or "unknown"
+
+
+def select_release_asset_name(
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+) -> str:
+    """Choose the Release asset name for the current platform."""
+    sysname = (system or platform.system() or "").lower()
+    arch = _normalize_arch(machine or platform.machine())
+
+    if sysname == "linux":
+        if arch == "x86_64":
+            return "cgp-linux-x86_64.tar.gz"
+        if arch == "arm64":
+            return "cgp-linux-arm64.tar.gz"
+        raise RuntimeError(f"Unsupported Linux arch: {arch}")
+
+    if sysname == "darwin":
+        if arch == "x86_64":
+            return "cgp-macos-x86_64.tar.gz"
+        if arch == "arm64":
+            return "cgp-macos-arm64.tar.gz"
+        raise RuntimeError(f"Unsupported macOS arch: {arch}")
+
+    if sysname == "windows":
+        if arch == "x86_64":
+            return "cgp-windows-x86_64.zip"
+        raise RuntimeError(f"Unsupported Windows arch: {arch}")
+
+    raise RuntimeError(f"Unsupported OS: {sysname}")
+
+
+def build_release_download_url(repo: str, *, tag: str, asset_name: str) -> str:
+    owner, name = split_repo(repo)
+    return f"https://github.com/{owner}/{name}/releases/download/{tag}/{asset_name}"
+
+
+def build_checksums_download_url(repo: str, *, tag: str) -> str:
+    owner, name = split_repo(repo)
+    return f"https://github.com/{owner}/{name}/releases/download/{tag}/checksums.txt"
+
+
+def parse_checksums_txt(txt: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for ln in (txt or "").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) < 2:
+            continue
+        sha = parts[0].strip().lower()
+        name = parts[-1].strip()
+        if len(sha) >= 32 and name:
+            out[name] = sha
+    return out
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _resolve_for_compare(p: Path) -> Path:
+    try:
+        return p.resolve(strict=False)
+    except Exception:
+        try:
+            return p.absolute()
+        except Exception:
+            return p
+
+
+def _abspath_for_compare(p: Path) -> Path:
+    try:
+        return p.expanduser().absolute()
+    except Exception:
+        try:
+            return p.absolute()
+        except Exception:
+            return p
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    c = _resolve_for_compare(child)
+    p = _resolve_for_compare(parent)
+    cp = c.parts
+    pp = p.parts
+    return len(cp) >= len(pp) and cp[: len(pp)] == pp
+
+
+def _atomic_symlink(target: Path, link: Path) -> None:
+    try:
+        if link.is_symlink():
+            try:
+                raw = os.readlink(link)
+                link_target = Path(raw)
+                if not link_target.is_absolute():
+                    link_target = link.parent / link_target
+                if _resolve_for_compare(link_target) == _resolve_for_compare(target):
+                    return
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if _abspath_for_compare(target) == _abspath_for_compare(link):
+        raise RuntimeError(f"refusing to create self-referential symlink: {link} -> {target}")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    tmp = link.with_name(f".{link.name}.{os.getpid()}.tmp")
+    try:
+        if tmp.exists() or tmp.is_symlink():
+            tmp.unlink()
+    except Exception:
+        pass
+    os.symlink(str(target), str(tmp))
+    os.replace(str(tmp), str(link))
+
+
+def _safe_extract_tar_gz(data: bytes, *, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        members = tf.getmembers()
+        for m in members:
+            name = m.name or ""
+            if name.startswith(("/", "\\")):
+                raise RuntimeError(f"unsafe tar member path: {name!r}")
+            parts = Path(name).parts
+            if any(p == ".." for p in parts):
+                raise RuntimeError(f"unsafe tar member path: {name!r}")
+            if m.issym() or m.islnk():
+                ln = m.linkname or ""
+                if ln.startswith(("/", "\\")) or any(p == ".." for p in Path(ln).parts):
+                    raise RuntimeError(f"unsafe tar link target: {name!r} -> {ln!r}")
+        try:
+            tf.extractall(path=str(dest_dir), filter="fully_trusted")  # type: ignore[call-arg]
+        except TypeError:
+            tf.extractall(path=str(dest_dir))
+
+
+def _safe_extract_zip(data: bytes, *, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for info in zf.infolist():
+            name = info.filename or ""
+            if name.startswith(("/", "\\")):
+                raise RuntimeError(f"unsafe zip member path: {name!r}")
+            parts = Path(name).parts
+            if any(p == ".." for p in parts):
+                raise RuntimeError(f"unsafe zip member path: {name!r}")
+        zf.extractall(path=str(dest_dir))
+
+
+@contextmanager
+def _install_lock(*, install_root: Path, wait_s: float = 0.0):
+    root = install_root.expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_dir = root / ".cgp.lock"
+    deadline = time.monotonic() + max(0.0, float(wait_s or 0.0))
+
+    while True:
+        try:
+            lock_dir.mkdir(mode=0o700)
+            try:
+                (lock_dir / "owner.txt").write_text(
+                    f"pid={os.getpid()}\nexe={sys.executable}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"cgp install/upgrade already in progress (lock: {lock_dir})")
+            time.sleep(0.1)
+        except Exception as e:
+            raise RuntimeError(f"failed to acquire install lock at {lock_dir}: {e}")
+
+    try:
+        yield
+    finally:
+        try:
+            shutil.rmtree(lock_dir)
+        except Exception:
+            pass
+
+
+def download_and_install_release_bundle(
+    *,
+    repo: str,
+    tag: str,
+    asset_name: str,
+    install_root: Path,
+    bin_dir: Path,
+    timeout_s: float = 30.0,
+    fetch: Fetch = _default_fetch,
+    verify_checksums: bool = True,
+) -> Path:
+    """
+    Download and install an onedir bundle from GitHub Releases.
+
+    Layout:
+      <install_root>/versions/<tag>/cgp/cgp   (executable inside bundle)
+      <install_root>/current -> versions/<tag>
+      <bin_dir>/cgp -> <install_root>/current/cgp/cgp
+    """
+    is_zip = asset_name.endswith(".zip")
+    is_tar = asset_name.endswith(".tar.gz")
+    if not is_zip and not is_tar:
+        raise RuntimeError(f"unsupported bundle asset: {asset_name}")
+
+    url = build_release_download_url(repo, tag=tag, asset_name=asset_name)
+    data = fetch(url, timeout_s, _http_headers())
+
+    checksums: Dict[str, str] = {}
+    if verify_checksums:
+        try:
+            c_url = build_checksums_download_url(repo, tag=tag)
+            c_raw = fetch(c_url, timeout_s, _http_headers())
+            checksums = parse_checksums_txt(c_raw.decode("utf-8", "replace"))
+        except Exception:
+            checksums = {}
+
+    if verify_checksums and checksums:
+        expected = checksums.get(asset_name)
+        if expected:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual.lower() != expected.lower():
+                raise RuntimeError(
+                    f"checksum mismatch for {asset_name}: expected {expected}, got {actual}"
+                )
+
+    install_root = install_root.expanduser()
+    bin_dir = bin_dir.expanduser()
+
+    with _install_lock(install_root=install_root, wait_s=0.0):
+        root_cmp = _resolve_for_compare(install_root)
+        if _is_within(bin_dir, root_cmp / "current") or _is_within(bin_dir, root_cmp / "versions"):
+            raise RuntimeError(
+                f"refusing to install into {bin_dir}: it is inside the cgp bundle root {install_root}. "
+                "Set CGP_INSTALL_DEST to a directory outside the bundle (e.g. ~/.local/bin)."
+            )
+
+        versions_dir = install_root / "versions"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix=".cgp-extract-", dir=str(versions_dir)))
+        try:
+            if is_tar:
+                _safe_extract_tar_gz(data, dest_dir=tmp_dir)
+            else:
+                _safe_extract_zip(data, dest_dir=tmp_dir)
+
+            exe_name = "cgp.exe" if sys.platform == "win32" else "cgp"
+            exe = tmp_dir / "cgp" / exe_name
+            if not exe.exists():
+                raise RuntimeError(f"invalid bundle: missing {exe}")
+            try:
+                st = exe.stat()
+                os.chmod(str(exe), st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            except Exception:
+                pass
+
+            version_dir = versions_dir / tag
+            if version_dir.exists():
+                try:
+                    shutil.rmtree(version_dir)
+                except Exception:
+                    pass
+            os.replace(str(tmp_dir), str(version_dir))
+
+            current = install_root / "current"
+            _atomic_symlink(version_dir, current)
+
+            target_exe = current / "cgp" / exe_name
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_symlink(target_exe, bin_dir / exe_name)
+
+            return target_exe
+        finally:
+            if tmp_dir.exists():
+                try:
+                    shutil.rmtree(tmp_dir)
+                except Exception:
+                    pass

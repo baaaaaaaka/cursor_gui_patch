@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursor-gui-patch"
+version = "0.1.0"
+description = "Patch tool for Cursor GUI & Server (model enumeration + auto-run controls)"
+requires-python = ">=3.9"
+license = "MIT"
+
+[project.optional-dependencies]
+bundle = ["certifi"]
+
+[project.scripts]
+cgp = "cursor_gui_patch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cursor_gui_patch*"]

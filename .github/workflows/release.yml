@@ -1,0 +1,223 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build linux x86_64 binary (Docker)
+        run: |
+          set -euxo pipefail
+          bash scripts/build_linux_binary_docker.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cgp-linux-x86_64.tar.gz
+          path: out/cgp-linux-x86_64.tar.gz
+
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build linux arm64 binary (Docker + QEMU)
+        run: |
+          set -euxo pipefail
+          CGP_LINUX_ARCH=arm64 bash scripts/build_linux_binary_docker.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cgp-linux-arm64.tar.gz
+          path: out/cgp-linux-arm64.tar.gz
+
+  build-macos-x86_64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build macOS x86_64 binary
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip setuptools wheel pyinstaller certifi
+          python -m pip install -e .
+          python -m PyInstaller --clean -n cgp --collect-data certifi \
+            --specpath out/_spec --distpath out/_dist --workpath out/_build \
+            cursor_gui_patch/__main__.py
+          tar -C out/_dist -czf out/cgp-macos-x86_64.tar.gz cgp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cgp-macos-x86_64.tar.gz
+          path: out/cgp-macos-x86_64.tar.gz
+
+  build-macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build macOS arm64 binary
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip setuptools wheel pyinstaller certifi
+          python -m pip install -e .
+          python -m PyInstaller --clean -n cgp --collect-data certifi \
+            --specpath out/_spec --distpath out/_dist --workpath out/_build \
+            cursor_gui_patch/__main__.py
+          tar -C out/_dist -czf out/cgp-macos-arm64.tar.gz cgp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cgp-macos-arm64.tar.gz
+          path: out/cgp-macos-arm64.tar.gz
+
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Windows x86_64 binary
+        shell: pwsh
+        run: |
+          python -m pip install -U pip setuptools wheel pyinstaller certifi
+          python -m pip install -e .
+          python -m PyInstaller --clean -n cgp --collect-data certifi `
+            --specpath out/_spec --distpath out/_dist --workpath out/_build `
+            cursor_gui_patch/__main__.py
+          Compress-Archive -Path out/_dist/cgp -DestinationPath out/cgp-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cgp-windows-x86_64.zip
+          path: out/cgp-windows-x86_64.zip
+
+  smoke-test:
+    runs-on: ${{ matrix.os }}
+    needs:
+      - build-linux-x86_64
+      - build-macos-arm64
+      - build-windows-x86_64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, asset: "cgp-linux-x86_64.tar.gz", exe: "cgp/cgp" }
+          - { os: macos-latest, asset: "cgp-macos-arm64.tar.gz", exe: "cgp/cgp" }
+          - { os: windows-latest, asset: "cgp-windows-x86_64.zip", exe: "cgp/cgp.exe" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist
+
+      - name: Extract and smoke test (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euxo pipefail
+          cd dist
+          tar -xzf "${{ matrix.asset }}"
+          chmod +x "${{ matrix.exe }}"
+          ./${{ matrix.exe }} --version
+          ./${{ matrix.exe }} status || true
+
+      - name: Extract and smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd dist
+          Expand-Archive -Path "${{ matrix.asset }}" -DestinationPath . -Force
+          & ".\${{ matrix.exe }}" --version
+          & ".\${{ matrix.exe }}" status
+
+  smoke-install:
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cgp-linux-x86_64.tar.gz
+          path: dist
+
+      - name: Prepare checksums
+        run: |
+          cd dist
+          sha256sum cgp-linux-x86_64.tar.gz > checksums.txt
+
+      - name: Test install script (offline)
+        run: |
+          set -euxo pipefail
+          export CGP_INSTALL_FROM_DIR="${PWD}/dist"
+          export CGP_INSTALL_DEST="${RUNNER_TEMP}/cgp-test/bin"
+          export CGP_INSTALL_ROOT="${RUNNER_TEMP}/cgp-test/root"
+          export CGP_INSTALL_OS="Linux"
+          export CGP_INSTALL_ARCH="x86_64"
+          mkdir -p "${CGP_INSTALL_DEST}" "${CGP_INSTALL_ROOT}"
+          sh scripts/install_cgp.sh
+          "${CGP_INSTALL_DEST}/cgp" --version
+
+  publish:
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-macos-x86_64
+      - build-macos-arm64
+      - build-windows-x86_64
+      - smoke-test
+      - smoke-install
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare checksums.txt
+        run: |
+          set -euxo pipefail
+          cd dist
+          sha256sum cgp-*.tar.gz cgp-*.zip > checksums.txt
+          ls -la
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/cgp-*
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,187 @@
+name: Cursor Compatibility Monitor
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cursor-compat
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect new Cursor versions
+    runs-on: ubuntu-latest
+    outputs:
+      missing_versions: ${{ steps.detect.outputs.missing_versions }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect versions to test
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Get latest Cursor version info.
+          if ! info="$(bash scripts/cursor_release_info.sh)"; then
+            echo "Failed to get Cursor release info" >&2
+            exit 1
+          fi
+          version="$(printf "%s\n" "$info" | awk -F= '/^version=/{print $2}')"
+          commit="$(printf "%s\n" "$info" | awk -F= '/^commit=/{print $2}')"
+          if [ -z "$version" ] || [ -z "$commit" ]; then
+            echo "Could not parse Cursor version info" >&2
+            echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Check if already tested.
+          if grep -q "^${version} " scripts/cursor_tested_versions.txt 2>/dev/null; then
+            echo "Version $version already tested."
+            echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "missing_versions=[{\"version\":\"$version\",\"commit\":\"$commit\"}]" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test patch on Cursor ${{ fromJSON(needs.detect.outputs.missing_versions)[0].version }}
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install cgp
+        run: pip install -e .
+
+      - name: Test patch against new Cursor version
+        shell: bash
+        env:
+          MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          import urllib.request
+          from pathlib import Path
+
+          versions = json.loads(os.environ["MISSING_VERSIONS_JSON"])
+          results = {}
+
+          for entry in versions:
+              version = entry["version"]
+              commit = entry["commit"]
+
+              # Download Cursor Server for linux-x64.
+              url = f"https://cursor.blob.core.windows.net/remote-releases/{commit}/vscode-reh-linux-x64.tar.gz"
+              print(f"Downloading Cursor Server {version} ({commit[:8]})...")
+
+              with tempfile.TemporaryDirectory() as tmpdir:
+                  archive = Path(tmpdir) / "server.tar.gz"
+                  try:
+                      urllib.request.urlretrieve(url, str(archive))
+                  except Exception as e:
+                      print(f"  Download failed: {e}")
+                      results[version] = {"commit": commit, "status": "download_failed"}
+                      continue
+
+                  # Extract.
+                  subprocess.run(["tar", "-xzf", str(archive), "-C", tmpdir], check=True)
+
+                  # Find the server dir.
+                  server_dir = None
+                  for d in Path(tmpdir).iterdir():
+                      if d.is_dir() and d.name != "server.tar.gz":
+                          server_dir = d
+                          break
+
+                  if not server_dir:
+                      print(f"  Could not find server directory after extraction")
+                      results[version] = {"commit": commit, "status": "extract_failed"}
+                      continue
+
+                  # Run dry-run patch.
+                  proc = subprocess.run(
+                      [sys.executable, "-m", "cursor_gui_patch", "patch", "--dry-run", "--server-dir", str(server_dir)],
+                      capture_output=True, text=True,
+                  )
+                  print(f"  Exit code: {proc.returncode}")
+                  print(f"  Output: {proc.stdout.strip()}")
+                  if proc.stderr.strip():
+                      print(f"  Stderr: {proc.stderr.strip()}")
+
+                  if proc.returncode == 0 and "Patched:" in proc.stdout:
+                      results[version] = {"commit": commit, "status": "pass"}
+                  else:
+                      results[version] = {"commit": commit, "status": "fail"}
+
+          Path("results").mkdir(exist_ok=True)
+          with open("results/linux.json", "w") as f:
+              json.dump(results, f, indent=2)
+
+          # Fail if any test failed.
+          for v, r in results.items():
+              if r["status"] != "pass":
+                  print(f"FAIL: {v} -> {r['status']}")
+                  sys.exit(1)
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor-compat-results
+          path: results/
+
+  update:
+    name: Update compatibility records
+    runs-on: ubuntu-latest
+    needs: [detect, test]
+    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: cursor-compat-results
+          path: results
+
+      - name: Update compatibility table
+        shell: bash
+        env:
+          MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+        run: |
+          set -euo pipefail
+          python3 scripts/cursor_compat_sync.py \
+            --missing-json "$MISSING_VERSIONS_JSON" \
+            --results-dir results
+
+      - name: Commit changes
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add docs/cursor_compatibility.md scripts/cursor_tested_versions.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: sync Cursor compatibility"
+          git push
