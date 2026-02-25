@@ -1,10 +1,13 @@
 """Tests for installation discovery."""
 
+from __future__ import annotations
+
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import List, Optional
 
 from cursor_gui_patch.discovery import (
     CursorInstallation,
@@ -15,7 +18,7 @@ from cursor_gui_patch.discovery import (
 )
 
 
-def _make_fake_installation(root: Path, extensions: list[str] | None = None) -> None:
+def _make_fake_installation(root: Path, extensions: Optional[List[str]] = None) -> None:
     """Create a minimal fake Cursor installation directory."""
     root.mkdir(parents=True, exist_ok=True)
     product_json = root / "product.json"

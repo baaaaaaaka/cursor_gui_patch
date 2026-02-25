@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tarfile
 import io
 import zipfile
@@ -194,6 +195,7 @@ class TestDownloadAndInstallBundle:
             zf.writestr(f"cgp/{exe_name}", "fake exe")
         return buf.getvalue()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks require elevated privileges on Windows")
     def test_tar_gz_install(self, tmp_path: Path):
         data = self._make_tar_gz()
         calls = {}

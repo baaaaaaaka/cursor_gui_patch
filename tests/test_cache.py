@@ -38,32 +38,25 @@ class TestCacheKey(unittest.TestCase):
 
 class TestCacheEntryMatches(unittest.TestCase):
     def test_matches(self):
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(b"test content")
-            f.flush()
-            try:
-                st = os.stat(f.name)
-                entry = make_cache_entry(STATUS_PATCHED, st)
-                self.assertTrue(cache_entry_matches(entry, st))
-            finally:
-                os.unlink(f.name)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.bin"
+            p.write_bytes(b"test content")
+            st = os.stat(str(p))
+            entry = make_cache_entry(STATUS_PATCHED, st)
+            self.assertTrue(cache_entry_matches(entry, st))
 
     def test_mismatch_after_modify(self):
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".js") as f:
-            f.write("original")
-            f.flush()
-            try:
-                st1 = os.stat(f.name)
-                entry = make_cache_entry(STATUS_PATCHED, st1)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.js"
+            p.write_text("original")
+            st1 = os.stat(str(p))
+            entry = make_cache_entry(STATUS_PATCHED, st1)
 
-                # Modify file
-                with open(f.name, "w") as f2:
-                    f2.write("modified content that is different length")
-                st2 = os.stat(f.name)
+            # Modify file
+            p.write_text("modified content that is different length")
+            st2 = os.stat(str(p))
 
-                self.assertFalse(cache_entry_matches(entry, st2))
-            finally:
-                os.unlink(f.name)
+            self.assertFalse(cache_entry_matches(entry, st2))
 
 
 class TestSaveLoadCache(unittest.TestCase):

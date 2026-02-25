@@ -1,9 +1,12 @@
 """Tests for the patching engine."""
 
+from __future__ import annotations
+
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Dict, Optional
 
 from cursor_gui_patch.discovery import CursorInstallation, EXTENSION_TARGETS
 from cursor_gui_patch.patching import patch, unpatch, status
@@ -33,7 +36,7 @@ MODELS_CONTENT = (
 IRRELEVANT_CONTENT = "function foo() { return 42; }"
 
 
-def _make_test_installation(root: Path, contents: dict[str, str] | None = None) -> CursorInstallation:
+def _make_test_installation(root: Path, contents: Optional[Dict[str, str]] = None) -> CursorInstallation:
     """Create a test installation with specified file contents."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "product.json").write_text(json.dumps({
