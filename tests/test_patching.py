@@ -9,7 +9,9 @@ import unittest
 from pathlib import Path
 from typing import Dict, Optional
 
-from cursor_gui_patch.discovery import CursorInstallation, EXTENSION_TARGETS
+import base64
+
+from cursor_gui_patch.discovery import CursorInstallation, EXTENSION_TARGETS, WORKBENCH_TARGETS
 from cursor_gui_patch.patching import patch, unpatch, status, _EXT_HOST_RELPATH
 from cursor_gui_patch.backup import has_backup
 
@@ -31,6 +33,13 @@ MODELS_CONTENT = (
     'availableModels:{name:"AvailableModels",I:r.AvailableModelsRequest,O:r.AvailableModelsResponse,kind:s.MethodKind.Unary},'
     'getUsableModels:{name:"GetUsableModels",I:r.GetUsableModelsRequest,O:r.GetUsableModelsResponse,kind:s.MethodKind.Unary},'
     'getDefaultModelForCli:{name:"GetDefaultModelForCli",I:r.GetDefaultModelForCliRequest,O:r.GetDefaultModelForCliResponse,kind:s.MethodKind.Unary}'
+)
+
+# Realistic sample content for workbench.desktop.main.js (autorun_workbench patch target)
+WORKBENCH_CONTENT = (
+    'prefix;{isAdminControlled:!1,isDisabledByAdmin:!0,allowed:[],blocked:[]};'
+    'function compute(v,w,S,k,D){return{isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D}}'
+    'suffix;'
 )
 
 # Content with no patchable patterns
@@ -272,6 +281,203 @@ class TestExtensionHostHashes(unittest.TestCase):
             patch(installations=[inst])
             self.assertEqual(ext_host.read_text(), original)
             self.assertFalse(has_backup(ext_host))
+
+
+def _add_workbench_file(root: Path, content: str = WORKBENCH_CONTENT) -> Path:
+    """Create workbench.desktop.main.js under the installation root."""
+    info = WORKBENCH_TARGETS["workbench.desktop.main.js"]
+    wb_path = root / str(info["file"])
+    wb_path.parent.mkdir(parents=True, exist_ok=True)
+    wb_path.write_text(content)
+    return wb_path
+
+
+def _b64sha256(data: bytes) -> str:
+    """Compute base64(sha256(data)) without padding — same format as product.json."""
+    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+
+
+def _add_product_json_with_checksums(root: Path, files: Dict[str, Path]) -> Path:
+    """Rewrite product.json to include a checksums dict.
+
+    *files* maps relative-to-out/ POSIX paths to their absolute file paths.
+    """
+    product_json = root / "product.json"
+    data = json.loads(product_json.read_text())
+    checksums: Dict[str, str] = {}
+    for rel_posix, abs_path in files.items():
+        checksums[rel_posix] = _b64sha256(abs_path.read_bytes())
+    data["checksums"] = checksums
+    product_json.write_bytes(
+        json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    return product_json
+
+
+class TestWorkbenchPatch(unittest.TestCase):
+    """Integration tests for the autorun_workbench patch via the patching engine."""
+
+    def test_workbench_patch_applies(self):
+        """Workbench file should be patched when present."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            wb = _add_workbench_file(root)
+
+            report = patch(installations=[inst])
+            self.assertTrue(report.ok)
+            self.assertIn(wb, report.patched)
+
+            content = wb.read_text()
+            self.assertIn("isDisabledByAdmin:!1", content)
+            self.assertNotIn("isDisabledByAdmin:!0", content)
+            self.assertIn("CGP_PATCH_AUTORUN_WORKBENCH", content)
+
+    def test_workbench_patch_idempotent(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            _add_workbench_file(root)
+
+            patch(installations=[inst])
+            report2 = patch(installations=[inst], force=True)
+            self.assertEqual(len([p for p in report2.patched
+                                  if p.name == "workbench.desktop.main.js"]), 0)
+
+    def test_workbench_skipped_when_absent(self):
+        """Server installs without workbench file should not error."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            # No workbench file
+            report = patch(installations=[inst])
+            self.assertTrue(report.ok)
+            self.assertEqual(len(report.patched), 2)  # only extension files
+
+    def test_unpatch_restores_workbench(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            wb = _add_workbench_file(root)
+            original = wb.read_text()
+
+            patch(installations=[inst])
+            self.assertNotEqual(wb.read_text(), original)
+
+            report = unpatch(installations=[inst])
+            self.assertTrue(report.ok)
+            self.assertIn(wb, report.restored)
+            self.assertEqual(wb.read_text(), original)
+
+
+class TestProductJsonChecksums(unittest.TestCase):
+    """Tests for product.json checksums update."""
+
+    def test_checksums_updated_after_patch(self):
+        """After patching, product.json checksums should match the new file contents."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            ext_host = _add_ext_host_with_hashes(root, contents)
+            wb = _add_workbench_file(root)
+
+            # Build checksums for ext_host and workbench
+            out_dir = root / "out"
+            checksum_files = {
+                ext_host.relative_to(out_dir).as_posix(): ext_host,
+                wb.relative_to(out_dir).as_posix(): wb,
+            }
+            product_json = _add_product_json_with_checksums(root, checksum_files)
+            original_pj = product_json.read_bytes()
+
+            report = patch(installations=[inst])
+            self.assertTrue(report.ok)
+
+            # product.json should have been modified
+            updated_pj = product_json.read_bytes()
+            self.assertNotEqual(original_pj, updated_pj)
+
+            # Verify checksums match actual file contents
+            data = json.loads(updated_pj)
+            checksums = data["checksums"]
+            for rel_posix, abs_path in checksum_files.items():
+                expected = _b64sha256(abs_path.read_bytes())
+                self.assertEqual(checksums[rel_posix], expected,
+                                 f"Checksum mismatch for {rel_posix}")
+
+    def test_checksums_backup_created(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            _add_ext_host_with_hashes(root, contents)
+            wb = _add_workbench_file(root)
+
+            out_dir = root / "out"
+            ext_host = root / _EXT_HOST_RELPATH
+            _add_product_json_with_checksums(root, {
+                ext_host.relative_to(out_dir).as_posix(): ext_host,
+                wb.relative_to(out_dir).as_posix(): wb,
+            })
+
+            product_json = root / "product.json"
+            patch(installations=[inst])
+            self.assertTrue(has_backup(product_json))
+
+    def test_unpatch_restores_product_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            ext_host = _add_ext_host_with_hashes(root, contents)
+            wb = _add_workbench_file(root)
+
+            out_dir = root / "out"
+            _add_product_json_with_checksums(root, {
+                ext_host.relative_to(out_dir).as_posix(): ext_host,
+                wb.relative_to(out_dir).as_posix(): wb,
+            })
+
+            product_json = root / "product.json"
+            original_pj = product_json.read_bytes()
+
+            patch(installations=[inst])
+            self.assertNotEqual(product_json.read_bytes(), original_pj)
+
+            report = unpatch(installations=[inst])
+            self.assertTrue(report.ok)
+            self.assertIn(product_json, report.restored)
+            self.assertEqual(product_json.read_bytes(), original_pj)
+            self.assertFalse(has_backup(product_json))
+
+    def test_empty_checksums_skipped(self):
+        """Server installs with empty checksums should not modify product.json."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            _add_ext_host_with_hashes(root, contents)
+
+            # Default product.json has no checksums field → treated as empty
+            product_json = root / "product.json"
+            original_pj = product_json.read_bytes()
+
+            patch(installations=[inst])
+            # product.json should not have a backup (no checksums to update)
+            self.assertFalse(has_backup(product_json))
 
 
 if __name__ == "__main__":

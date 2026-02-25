@@ -20,6 +20,14 @@ EXTENSION_TARGETS: Dict[str, Dict[str, object]] = {
     "cursor-commits": {"file": "dist/main.js", "patches": ["models"]},
 }
 
+# Workbench targets (directly under installation root, only present in GUI installs).
+WORKBENCH_TARGETS: Dict[str, Dict[str, object]] = {
+    "workbench.desktop.main.js": {
+        "file": "out/vs/workbench/workbench.desktop.main.js",
+        "patches": ["autorun_workbench"],
+    },
+}
+
 
 @dataclass
 class CursorInstallation:
@@ -44,6 +52,17 @@ class CursorInstallation:
                 targets.append(TargetFile(
                     path=js_file,
                     extension=ext_name,
+                    patch_names=patches,
+                    installation=self,
+                ))
+        # Workbench targets (directly under root, GUI installs only)
+        for wb_name, info in WORKBENCH_TARGETS.items():
+            js_file = self.root / str(info["file"])
+            if js_file.is_file():
+                patches = list(info["patches"]) if isinstance(info["patches"], list) else []
+                targets.append(TargetFile(
+                    path=js_file,
+                    extension=wb_name,
                     patch_names=patches,
                     installation=self,
                 ))

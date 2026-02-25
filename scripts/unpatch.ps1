@@ -42,6 +42,11 @@ if ($ExistingCgp) {
     & cgp unpatch
     $ExitCode = $LASTEXITCODE
     Write-Host "---"
+    if ($ExitCode -eq 0) {
+        Write-Host ""
+        Write-Host "Removing auto-patcher extension..."
+        try { & cgp auto uninstall } catch {}
+    }
     if ($ExitCode -ne 0) {
         Write-Host ""
         Write-Host "Unpatch failed (exit code $ExitCode)."
@@ -83,6 +88,13 @@ if ($PyCmds) {
         }
 
         Write-Host "---"
+        if ($ExitCode -eq 0) {
+            Write-Host ""
+            Write-Host "Removing auto-patcher extension..."
+            Push-Location $TmpDir
+            try { Invoke-PythonCmd -PyCmds $PyCmds -Arguments @("-m", "cursor_gui_patch", "auto", "uninstall") } catch {}
+            finally { Pop-Location }
+        }
         if ($ExitCode -ne 0) {
             Write-Host ""
             Write-Host "Unpatch failed (exit code $ExitCode)."
@@ -125,6 +137,11 @@ try {
     $ExitCode = $LASTEXITCODE
 
     Write-Host "---"
+    if ($ExitCode -eq 0) {
+        Write-Host ""
+        Write-Host "Removing auto-patcher extension..."
+        try { & $Exe auto uninstall } catch {}
+    }
     if ($ExitCode -ne 0) {
         Write-Host ""
         Write-Host "Unpatch failed (exit code $ExitCode)."

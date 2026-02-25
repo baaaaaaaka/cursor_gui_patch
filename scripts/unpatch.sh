@@ -43,6 +43,11 @@ if command -v cgp >/dev/null 2>&1; then
   printf '%s\n' "---"
   cgp unpatch || EXIT_CODE=$?
   printf '%s\n' "---"
+  if [ "${EXIT_CODE:-0}" = "0" ]; then
+    printf '%s\n' ""
+    printf '%s\n' "Removing auto-patcher extension..."
+    cgp auto uninstall || true
+  fi
   if [ "${EXIT_CODE:-0}" != "0" ]; then
     printf '%s\n' ""
     printf '%s\n' "Unpatch failed (exit code ${EXIT_CODE:-0})."
@@ -78,6 +83,11 @@ if [ -n "${PYTHON}" ]; then
   (cd "${TMP_DIR}" && "${PYTHON}" -m cursor_gui_patch unpatch) || EXIT_CODE=$?
 
   printf '%s\n' "---"
+  if [ "${EXIT_CODE:-0}" = "0" ]; then
+    printf '%s\n' ""
+    printf '%s\n' "Removing auto-patcher extension..."
+    (cd "${TMP_DIR}" && "${PYTHON}" -m cursor_gui_patch auto uninstall) || true
+  fi
   if [ "${EXIT_CODE:-0}" != "0" ]; then
     printf '%s\n' ""
     printf '%s\n' "Unpatch failed (exit code ${EXIT_CODE:-0})."
@@ -139,6 +149,11 @@ printf '%s\n' "---"
 "${CGP}" unpatch || EXIT_CODE=$?
 
 printf '%s\n' "---"
+if [ "${EXIT_CODE:-0}" = "0" ]; then
+  printf '%s\n' ""
+  printf '%s\n' "Removing auto-patcher extension..."
+  "${CGP}" auto uninstall || true
+fi
 if [ "${EXIT_CODE:-0}" != "0" ]; then
   printf '%s\n' ""
   printf '%s\n' "Unpatch failed (exit code ${EXIT_CODE:-0})."

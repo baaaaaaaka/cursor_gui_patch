@@ -45,6 +45,9 @@ if command -v cgp >/dev/null 2>&1; then
   printf '%s\n' "---"
   if [ "${EXIT_CODE:-0}" = "0" ]; then
     printf '%s\n' ""
+    printf '%s\n' "Installing auto-patcher extension..."
+    cgp auto install || true
+    printf '%s\n' ""
     printf '%s\n' "To undo, run:"
     printf '%s\n' "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/unpatch.sh | sh"
   else
@@ -83,6 +86,9 @@ if [ -n "${PYTHON}" ]; then
 
   printf '%s\n' "---"
   if [ "${EXIT_CODE:-0}" = "0" ]; then
+    printf '%s\n' ""
+    printf '%s\n' "Installing auto-patcher extension..."
+    (cd "${TMP_DIR}" && "${PYTHON}" -m cursor_gui_patch auto install) || true
     printf '%s\n' ""
     printf '%s\n' "To undo, run:"
     printf '%s\n' "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/unpatch.sh | sh"
@@ -150,6 +156,9 @@ printf '%s\n' "---"
 
 printf '%s\n' "---"
 if [ "${EXIT_CODE:-0}" = "0" ]; then
+  printf '%s\n' ""
+  printf '%s\n' "Installing auto-patcher extension..."
+  "${CGP}" auto install || true
   printf '%s\n' ""
   printf '%s\n' "To undo, run:"
   printf '%s\n' "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/unpatch.sh | sh"

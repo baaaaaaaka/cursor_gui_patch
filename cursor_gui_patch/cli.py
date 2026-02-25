@@ -45,6 +45,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Show installation and patch status")
     p_status.add_argument("--json", dest="json_output", action="store_true", help="Output as JSON")
 
+    # auto
+    p_auto = sub.add_parser("auto", help="Manage auto-patch Cursor extension")
+    p_auto.add_argument("action", choices=["install", "uninstall", "status"])
+    p_auto.add_argument(
+        "--target", choices=["gui", "server"], default="gui",
+        help="Where to install (default: gui)",
+    )
+
     return parser
 
 
@@ -127,3 +135,15 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(json.dumps(data, indent=2))
         else:
             print(report.summary())
+
+    elif args.command == "auto":
+        from .auto_extension import install as ext_install
+        from .auto_extension import uninstall as ext_uninstall
+        from .auto_extension import status as ext_status
+
+        if args.action == "install":
+            print(ext_install(target=args.target))
+        elif args.action == "uninstall":
+            print(ext_uninstall(target=args.target))
+        elif args.action == "status":
+            print(ext_status(target=args.target))

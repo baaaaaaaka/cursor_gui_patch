@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -81,6 +83,7 @@ def _patch_installation(
 
     targets = inst.target_files()
     hash_pairs: List[Tuple[str, str]] = []
+    patched_before = len(report.patched)
 
     for target in targets:
         result = _patch_target(
@@ -94,8 +97,27 @@ def _patch_installation(
             hash_pairs.append(result)
 
     # Update extension host hashes after all extension files are patched
+    ext_host_modified = False
     if hash_pairs:
-        _update_extension_host_hashes(inst, hash_pairs, report)
+        ext_host_modified = _update_extension_host_hashes(inst, hash_pairs, report)
+
+    # Update product.json checksums for any modified files under out/
+    if not dry_run:
+        newly_patched = report.patched[patched_before:]
+        out_dir = inst.root / "out"
+        out_files: List[Path] = []
+        for p in newly_patched:
+            try:
+                p.relative_to(out_dir)
+                out_files.append(p)
+            except ValueError:
+                pass
+        if ext_host_modified:
+            ext_host = inst.root / _EXT_HOST_RELPATH
+            if ext_host not in out_files:
+                out_files.append(ext_host)
+        if out_files:
+            _update_product_json_checksums(inst, out_files, report)
 
     # Save cache
     if new_cache is not None:
@@ -112,17 +134,20 @@ def _update_extension_host_hashes(
     inst: CursorInstallation,
     hash_pairs: List[Tuple[str, str]],
     report: PatchReport,
-) -> None:
-    """Replace old extension file hashes with new ones in extensionHostProcess.js."""
+) -> bool:
+    """Replace old extension file hashes with new ones in extensionHostProcess.js.
+
+    Returns True if the file was modified.
+    """
     ext_host = inst.root / _EXT_HOST_RELPATH
     if not ext_host.is_file():
-        return
+        return False
 
     try:
         content = ext_host.read_bytes().decode("utf-8", errors="replace")
     except Exception as e:
         report.errors.append((ext_host, f"read failed: {e}"))
-        return
+        return False
 
     original_content = content
     for old_hash, new_hash in hash_pairs:
@@ -130,14 +155,78 @@ def _update_extension_host_hashes(
 
     if content == original_content:
         # No hashes were found/replaced — nothing to do
-        return
+        return False
 
     bak.create_backup(ext_host)
 
     try:
         ext_host.write_bytes(content.encode("utf-8"))
+        return True
     except Exception as e:
         report.errors.append((ext_host, f"write failed: {e}"))
+        return False
+
+
+def _update_product_json_checksums(
+    inst: CursorInstallation,
+    modified_files: List[Path],
+    report: PatchReport,
+) -> None:
+    """Update checksums in product.json for modified files under out/.
+
+    GUI installs have a non-empty ``checksums`` dict in product.json mapping
+    relative paths (from ``out/``) to ``base64(sha256, no padding)``.  Server
+    installs have ``{}`` and are skipped automatically.
+    """
+    product_json = inst.root / "product.json"
+    if not product_json.is_file():
+        return
+
+    try:
+        raw = product_json.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        report.errors.append((product_json, f"read failed: {e}"))
+        return
+
+    checksums = data.get("checksums")
+    if not isinstance(checksums, dict) or not checksums:
+        return  # Server installs have empty checksums — nothing to update
+
+    out_dir = inst.root / "out"
+    updated = False
+
+    for file_path in modified_files:
+        try:
+            rel = file_path.relative_to(out_dir).as_posix()
+        except ValueError:
+            continue  # Not under out/, skip
+
+        if rel not in checksums:
+            continue
+
+        try:
+            file_bytes = file_path.read_bytes()
+        except Exception:
+            continue
+
+        digest = hashlib.sha256(file_bytes).digest()
+        new_hash = base64.b64encode(digest).decode("ascii").rstrip("=")
+        checksums[rel] = new_hash
+        updated = True
+
+    if not updated:
+        return
+
+    bak.create_backup(product_json)
+
+    try:
+        # Write back with compact separators to match original Cursor format
+        product_json.write_bytes(
+            json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+    except Exception as e:
+        report.errors.append((product_json, f"write failed: {e}"))
 
 
 def _patch_target(
@@ -321,19 +410,19 @@ def unpatch(
             except Exception as e:
                 report.errors.append((path, f"restore failed: {e}"))
 
-        # Restore extensionHostProcess.js if it was backed up
-        ext_host = inst.root / _EXT_HOST_RELPATH
-        if not dry_run and bak.has_backup(ext_host):
-            try:
-                if bak.restore_backup(ext_host):
-                    report.restored.append(ext_host)
-                    bak.remove_backup(ext_host)
-                else:
-                    report.errors.append((ext_host, "restore failed"))
-            except Exception as e:
-                report.errors.append((ext_host, f"restore failed: {e}"))
-        elif dry_run and bak.has_backup(ext_host):
-            report.restored.append(ext_host)
+        # Restore auxiliary files (extensionHostProcess.js, product.json) if backed up
+        for aux_path in (inst.root / _EXT_HOST_RELPATH, inst.root / "product.json"):
+            if not dry_run and bak.has_backup(aux_path):
+                try:
+                    if bak.restore_backup(aux_path):
+                        report.restored.append(aux_path)
+                        bak.remove_backup(aux_path)
+                    else:
+                        report.errors.append((aux_path, "restore failed"))
+                except Exception as e:
+                    report.errors.append((aux_path, f"restore failed: {e}"))
+            elif dry_run and bak.has_backup(aux_path):
+                report.restored.append(aux_path)
 
         restored_after = len(report.restored)
 

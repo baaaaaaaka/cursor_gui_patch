@@ -44,6 +44,9 @@ if ($ExistingCgp) {
     Write-Host "---"
     if ($ExitCode -eq 0) {
         Write-Host ""
+        Write-Host "Installing auto-patcher extension..."
+        try { & cgp auto install } catch {}
+        Write-Host ""
         Write-Host "To undo, run:"
         Write-Host "  irm https://raw.githubusercontent.com/$Repo/main/scripts/unpatch.ps1 | iex"
     } else {
@@ -88,6 +91,11 @@ if ($PyCmds) {
 
         Write-Host "---"
         if ($ExitCode -eq 0) {
+            Write-Host ""
+            Write-Host "Installing auto-patcher extension..."
+            Push-Location $TmpDir
+            try { Invoke-PythonCmd -PyCmds $PyCmds -Arguments @("-m", "cursor_gui_patch", "auto", "install") } catch {}
+            finally { Pop-Location }
             Write-Host ""
             Write-Host "To undo, run:"
             Write-Host "  irm https://raw.githubusercontent.com/$Repo/main/scripts/unpatch.ps1 | iex"
@@ -135,6 +143,9 @@ try {
 
     Write-Host "---"
     if ($ExitCode -eq 0) {
+        Write-Host ""
+        Write-Host "Installing auto-patcher extension..."
+        try { & $Exe auto install } catch {}
         Write-Host ""
         Write-Host "To undo, run:"
         Write-Host "  irm https://raw.githubusercontent.com/$Repo/main/scripts/unpatch.ps1 | iex"

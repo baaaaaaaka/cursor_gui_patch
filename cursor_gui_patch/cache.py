@@ -11,7 +11,7 @@ _CACHE_FILENAME = ".cgp-patch-cache.json"
 _CACHE_VERSION = 1
 
 # Bump this when patch logic changes to invalidate stale caches.
-_CACHE_SIGNATURE = "cgp_v1_autorun+models"
+_CACHE_SIGNATURE = "cgp_v1_autorun+autorun_workbench+models"
 
 STATUS_PATCHED = "already_patched"
 STATUS_NOT_APPLICABLE = "not_applicable"
