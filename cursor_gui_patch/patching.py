@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import backup as bak
 from . import cache as ca
@@ -79,15 +80,22 @@ def _patch_installation(
         new_cache = {}
 
     targets = inst.target_files()
+    hash_pairs: List[Tuple[str, str]] = []
 
     for target in targets:
-        _patch_target(
+        result = _patch_target(
             target, report,
             cache_data=cache_data,
             new_cache=new_cache,
             dry_run=dry_run,
             only_patches=only_patches,
         )
+        if result is not None:
+            hash_pairs.append(result)
+
+    # Update extension host hashes after all extension files are patched
+    if hash_pairs:
+        _update_extension_host_hashes(inst, hash_pairs, report)
 
     # Save cache
     if new_cache is not None:
@@ -95,6 +103,41 @@ def _patch_installation(
             ca.save_cache(inst.root, new_cache)
         except Exception:
             pass
+
+
+_EXT_HOST_RELPATH = Path("out/vs/workbench/api/node/extensionHostProcess.js")
+
+
+def _update_extension_host_hashes(
+    inst: CursorInstallation,
+    hash_pairs: List[Tuple[str, str]],
+    report: PatchReport,
+) -> None:
+    """Replace old extension file hashes with new ones in extensionHostProcess.js."""
+    ext_host = inst.root / _EXT_HOST_RELPATH
+    if not ext_host.is_file():
+        return
+
+    try:
+        content = ext_host.read_bytes().decode("utf-8", errors="replace")
+    except Exception as e:
+        report.errors.append((ext_host, f"read failed: {e}"))
+        return
+
+    original_content = content
+    for old_hash, new_hash in hash_pairs:
+        content = content.replace(old_hash, new_hash)
+
+    if content == original_content:
+        # No hashes were found/replaced — nothing to do
+        return
+
+    bak.create_backup(ext_host)
+
+    try:
+        ext_host.write_bytes(content.encode("utf-8"))
+    except Exception as e:
+        report.errors.append((ext_host, f"write failed: {e}"))
 
 
 def _patch_target(
@@ -105,8 +148,11 @@ def _patch_target(
     new_cache: Optional[Dict[str, Dict[str, Any]]],
     dry_run: bool,
     only_patches: Optional[Set[str]],
-) -> None:
-    """Apply relevant patches to a single target file."""
+) -> Optional[Tuple[str, str]]:
+    """Apply relevant patches to a single target file.
+
+    Returns (old_hash, new_hash) if a file was actually written, else None.
+    """
     path = target.path
     root = target.installation.root
     cache_key = ca.make_cache_key(path, root)
@@ -118,7 +164,7 @@ def _patch_target(
             st = path.stat()
         except Exception as e:
             report.errors.append((path, f"stat failed: {e}"))
-            return
+            return None
         cached = cache_data.get(cache_key)
         if isinstance(cached, dict) and ca.cache_entry_matches(cached, st):
             report.skipped_cached += 1
@@ -129,17 +175,18 @@ def _patch_target(
                 report.skipped_not_applicable += 1
             if new_cache is not None:
                 new_cache[cache_key] = cached
-            return
+            return None
 
     report.scanned += 1
 
     # Read file (binary mode to preserve exact bytes — avoids Windows text-mode
     # converting \n to \r\n on write).
     try:
-        content = path.read_bytes().decode("utf-8", errors="replace")
+        original_bytes = path.read_bytes()
+        content = original_bytes.decode("utf-8", errors="replace")
     except Exception as e:
         report.errors.append((path, f"read failed: {e}"))
-        return
+        return None
 
     # Determine which patches to apply
     patch_names = target.patch_names
@@ -184,11 +231,14 @@ def _patch_target(
                     st = None
             if st is not None:
                 new_cache[cache_key] = ca.make_cache_entry(cache_status, st)
-        return
+        return None
 
     if dry_run:
         report.patched.append(path)
-        return
+        return None
+
+    # Compute hash of original content before writing
+    old_hash = hashlib.sha256(original_bytes).hexdigest()
 
     # Create backup (idempotent)
     bak.create_backup(path)
@@ -201,7 +251,8 @@ def _patch_target(
             st = None
 
     try:
-        path.write_bytes(new_content.encode("utf-8"))
+        new_bytes = new_content.encode("utf-8")
+        path.write_bytes(new_bytes)
         # Preserve permissions
         if st is not None:
             try:
@@ -210,6 +261,9 @@ def _patch_target(
                 pass
         report.patched.append(path)
 
+        # Compute hash of new content
+        new_hash = hashlib.sha256(new_bytes).hexdigest()
+
         # Update cache
         if new_cache is not None:
             try:
@@ -217,8 +271,11 @@ def _patch_target(
                 new_cache[cache_key] = ca.make_cache_entry(ca.STATUS_PATCHED, st_after)
             except Exception:
                 pass
+
+        return (old_hash, new_hash)
     except Exception as e:
         report.errors.append((path, f"write failed: {e}"))
+        return None
 
 
 def unpatch(
@@ -263,6 +320,20 @@ def unpatch(
                     report.errors.append((path, "restore failed"))
             except Exception as e:
                 report.errors.append((path, f"restore failed: {e}"))
+
+        # Restore extensionHostProcess.js if it was backed up
+        ext_host = inst.root / _EXT_HOST_RELPATH
+        if not dry_run and bak.has_backup(ext_host):
+            try:
+                if bak.restore_backup(ext_host):
+                    report.restored.append(ext_host)
+                    bak.remove_backup(ext_host)
+                else:
+                    report.errors.append((ext_host, "restore failed"))
+            except Exception as e:
+                report.errors.append((ext_host, f"restore failed: {e}"))
+        elif dry_run and bak.has_backup(ext_host):
+            report.restored.append(ext_host)
 
         restored_after = len(report.restored)
 

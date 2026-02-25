@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from cursor_gui_patch.discovery import CursorInstallation, EXTENSION_TARGETS
-from cursor_gui_patch.patching import patch, unpatch, status
+from cursor_gui_patch.patching import patch, unpatch, status, _EXT_HOST_RELPATH
 from cursor_gui_patch.backup import has_backup
 
 # Realistic sample content for cursor-agent-exec (autorun patch target)
@@ -163,6 +164,114 @@ class TestStatus(unittest.TestCase):
             for f in report.files:
                 for pname, is_patched in f.patched.items():
                     self.assertTrue(is_patched, f"{f.extension}:{pname} should be patched")
+
+
+def _add_ext_host_with_hashes(root: Path, contents: Dict[str, str]) -> Path:
+    """Create extensionHostProcess.js containing SHA-256 hashes of extension files."""
+    ext_host = root / _EXT_HOST_RELPATH
+    ext_host.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build a fake extensionHostProcess.js that embeds hashes of extension files
+    hashes = []
+    for ext_name, content in contents.items():
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        hashes.append(h)
+    ext_host_content = "var krt={" + ",".join(f'"{h}":true' for h in hashes) + "};"
+    ext_host.write_text(ext_host_content)
+    return ext_host
+
+
+class TestExtensionHostHashes(unittest.TestCase):
+    def test_patch_updates_hashes(self):
+        """Patching should replace old hashes with new hashes in extensionHostProcess.js."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            ext_host = _add_ext_host_with_hashes(root, contents)
+
+            original_ext_host = ext_host.read_text()
+
+            report = patch(installations=[inst])
+            self.assertTrue(report.ok)
+
+            updated_ext_host = ext_host.read_text()
+            # extensionHostProcess.js should have been modified
+            self.assertNotEqual(original_ext_host, updated_ext_host)
+
+            # Old hashes should be gone, new hashes should be present
+            for ext_name, content in contents.items():
+                old_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                self.assertNotIn(old_hash, updated_ext_host)
+
+            # New hashes should match the actual patched file contents
+            for t in inst.target_files():
+                new_hash = hashlib.sha256(t.path.read_bytes()).hexdigest()
+                self.assertIn(new_hash, updated_ext_host)
+
+    def test_patch_creates_ext_host_backup(self):
+        """Patching should create a backup of extensionHostProcess.js."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            _add_ext_host_with_hashes(root, contents)
+
+            ext_host = root / _EXT_HOST_RELPATH
+            patch(installations=[inst])
+            self.assertTrue(has_backup(ext_host))
+
+    def test_unpatch_restores_ext_host(self):
+        """Unpatching should restore extensionHostProcess.js from backup."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            ext_host = _add_ext_host_with_hashes(root, contents)
+
+            original_ext_host = ext_host.read_text()
+
+            patch(installations=[inst])
+            self.assertNotEqual(ext_host.read_text(), original_ext_host)
+
+            report = unpatch(installations=[inst])
+            self.assertTrue(report.ok)
+            self.assertIn(ext_host, report.restored)
+            self.assertEqual(ext_host.read_text(), original_ext_host)
+            self.assertFalse(has_backup(ext_host))
+
+    def test_no_ext_host_file_is_ok(self):
+        """Patching should succeed even without extensionHostProcess.js."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            # No extensionHostProcess.js created
+            report = patch(installations=[inst])
+            self.assertTrue(report.ok)
+            self.assertEqual(len(report.patched), 2)
+
+    def test_ext_host_no_matching_hashes(self):
+        """If extensionHostProcess.js has no matching hashes, it should not be modified."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            ext_host = root / _EXT_HOST_RELPATH
+            ext_host.parent.mkdir(parents=True, exist_ok=True)
+            ext_host.write_text("var krt={};")
+
+            original = ext_host.read_text()
+            patch(installations=[inst])
+            self.assertEqual(ext_host.read_text(), original)
+            self.assertFalse(has_backup(ext_host))
 
 
 if __name__ == "__main__":
