@@ -49,7 +49,7 @@ jobs:
           path: out/cgp-linux-arm64.tar.gz
 
   build-macos-x86_64:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
