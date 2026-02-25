@@ -17,13 +17,11 @@ from cursor_gui_patch.backup import has_backup
 
 # Realistic sample content for cursor-agent-exec (autorun patch target)
 AUTORUN_CONTENT = (
-    'prefix;async getAutoRunControls(){const e=await this.getTeamAdminSettings();'
-    'if(e?.autoRunControls?.enabled)return{enabled:e.autoRunControls.enabled,'
-    'allowed:e.autoRunControls.allowed??[],blocked:e.autoRunControls.blocked??[],'
-    'enableRunEverything:e.autoRunControls.enableRunEverything??!1,'
-    'mcpToolAllowlist:e.autoRunControls.mcpToolAllowlist??[]}};'
-    'const h=await this.teamSettingsService.getAutoRunControls(),p={type:"insecure_none"};'
-    'const l=await this.teamSettingsService.getAutoRunControls(),u=!0===l?.enabled;suffix'
+    'prefix;async getTeamAdminSettings(){return(Date.now()-this.lastFetchTime>ra||'
+    'void 0===await this.settingsPromise)&&(this.settingsPromise=this.fetchSettings()),'
+    'this.settingsPromise};'
+    'async getAutoRunControls(){const e=await this.getTeamAdminSettings();'
+    'if(e?.autoRunControls?.enabled)return{enabled:e.autoRunControls.enabled}};suffix'
 )
 
 # Realistic sample content for model patch targets
@@ -37,9 +35,8 @@ MODELS_CONTENT = (
 
 # Realistic sample content for workbench.desktop.main.js (autorun_workbench patch target)
 WORKBENCH_CONTENT = (
-    'prefix;{isAdminControlled:!1,isDisabledByAdmin:!0,allowed:[],blocked:[]};'
-    'o={isAdminControlled:!0,isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D,browserFeatures:r?.browserFeatures};'
-    'suffix;'
+    'prefix;r=void 0}const s=r?.autoRunControls?.enabled??!1;BNp(s);let o;'
+    'if(s){const v=r?.autoRunControls?.allowed??[]};suffix;'
 )
 
 # Content with no patchable patterns
@@ -329,9 +326,8 @@ class TestWorkbenchPatch(unittest.TestCase):
             self.assertIn(wb, report.patched)
 
             content = wb.read_text()
-            self.assertIn("isDisabledByAdmin:!1", content)
-            self.assertNotIn("isDisabledByAdmin:!0", content)
-            self.assertNotIn("isAdminControlled:!0", content)
+            # The enabled check should be short-circuited to !1
+            self.assertNotIn("r?.autoRunControls?.enabled", content)
             self.assertIn("CGP_PATCH_AUTORUN_WORKBENCH", content)
 
     def test_workbench_patch_idempotent(self):

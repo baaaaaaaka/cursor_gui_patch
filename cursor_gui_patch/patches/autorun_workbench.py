@@ -1,4 +1,4 @@
-"""Workbench autorun patch: force isDisabledByAdmin to false in workbench.desktop.main.js."""
+"""Workbench autorun patch: disable admin autorun controls in workbench.desktop.main.js."""
 
 from __future__ import annotations
 
@@ -8,15 +8,13 @@ from .base import BasePatch, PatchResult
 
 _MARKER = "CGP_PATCH_AUTORUN_WORKBENCH"
 
-# Default value: loaded before team settings arrive
-_OLD_DEFAULT = "isAdminControlled:!1,isDisabledByAdmin:!0"
-_NEW_DEFAULT = "isAdminControlled:!1,isDisabledByAdmin:!1"
-
-# Computed value: result of team settings evaluation.
-# Must also flip isAdminControlled to !1 so the UI doesn't enter
-# non-editable admin-controlled mode.
-_OLD_COMPUTED = "isAdminControlled:!0,isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D"
-_NEW_COMPUTED = "isAdminControlled:!1,isDisabledByAdmin:!1"
+# The workbench independently fetches team admin settings and checks:
+#   const s = r?.autoRunControls?.enabled ?? !1;
+#   if (s) { /* build admin-controlled state */ }
+# Replacing the check with !1 (false) prevents the admin-controlled branch
+# from ever executing, so the UI stays in user-controlled mode.
+_OLD_ENABLED_CHECK = "r?.autoRunControls?.enabled??!1"
+_NEW_ENABLED_CHECK = "!1"
 
 
 class AutoRunWorkbenchPatch(BasePatch):
@@ -29,7 +27,7 @@ class AutoRunWorkbenchPatch(BasePatch):
         return _MARKER
 
     def is_applicable(self, content: str) -> bool:
-        return _OLD_DEFAULT in content or _OLD_COMPUTED in content
+        return _OLD_ENABLED_CHECK in content
 
     def apply(self, content: str) -> Tuple[str, PatchResult]:
         result = PatchResult()
@@ -42,39 +40,14 @@ class AutoRunWorkbenchPatch(BasePatch):
             result.not_applicable = True
             return content, result
 
-        new_content = content
-        count = 0
+        new_content = content.replace(
+            _OLD_ENABLED_CHECK,
+            f"{_NEW_ENABLED_CHECK}/* {_MARKER} */",
+            1,
+        )
 
-        # Patch default value
-        if _OLD_DEFAULT in new_content:
-            new_content = new_content.replace(_OLD_DEFAULT, _NEW_DEFAULT, 1)
-            count += 1
-            result.details.append("Patched isDisabledByAdmin default value")
-
-        # Patch computed value
-        if _OLD_COMPUTED in new_content:
-            new_content = new_content.replace(_OLD_COMPUTED, _NEW_COMPUTED, 1)
-            count += 1
-            result.details.append("Patched isDisabledByAdmin computed value")
-
-        if count > 0:
-            # Inject marker as a JS comment after the last replacement site.
-            # Prefer attaching to the computed replacement; fall back to default.
-            if _NEW_COMPUTED in new_content:
-                new_content = new_content.replace(
-                    _NEW_COMPUTED,
-                    f"{_NEW_COMPUTED}/* {_MARKER} */",
-                    1,
-                )
-            else:
-                new_content = new_content.replace(
-                    _NEW_DEFAULT,
-                    f"{_NEW_DEFAULT}/* {_MARKER} */",
-                    1,
-                )
-            result.applied = True
-            result.replacements = count
-        else:
-            result.not_applicable = True
+        result.applied = True
+        result.replacements = 1
+        result.details.append("Disabled autoRunControls.enabled check")
 
         return new_content, result

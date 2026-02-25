@@ -5,13 +5,9 @@ import unittest
 from cursor_gui_patch.patches.autorun_workbench import AutoRunWorkbenchPatch
 
 # Sample extracted from workbench.desktop.main.js (minified)
-SAMPLE_DEFAULT = "isAdminControlled:!1,isDisabledByAdmin:!0"
-SAMPLE_COMPUTED = "isAdminControlled:!0,isDisabledByAdmin:v.length+w.length===0&&!S&&k.length===0&&!D"
-
-SAMPLE_FULL = (
-    f"prefix;{{{SAMPLE_DEFAULT},allowed:[],blocked:[]}};"
-    f"o={{{SAMPLE_COMPUTED},browserFeatures:r?.browserFeatures}};"
-    "suffix;"
+SAMPLE = (
+    'prefix;r=void 0}const s=r?.autoRunControls?.enabled??!1;BNp(s);let o;'
+    'if(s){const v=r?.autoRunControls?.allowed??[]};suffix'
 )
 
 
@@ -25,51 +21,31 @@ class TestAutoRunWorkbenchPatch(unittest.TestCase):
     def test_marker(self):
         self.assertEqual(self.patch.marker, "CGP_PATCH_AUTORUN_WORKBENCH")
 
-    def test_is_applicable_both_patterns(self):
-        self.assertTrue(self.patch.is_applicable(SAMPLE_FULL))
-
-    def test_is_applicable_default_only(self):
-        self.assertTrue(self.patch.is_applicable(f"prefix;{SAMPLE_DEFAULT};suffix"))
-
-    def test_is_applicable_computed_only(self):
-        self.assertTrue(self.patch.is_applicable(f"prefix;{SAMPLE_COMPUTED};suffix"))
+    def test_is_applicable_true(self):
+        self.assertTrue(self.patch.is_applicable(SAMPLE))
 
     def test_is_applicable_false(self):
         self.assertFalse(self.patch.is_applicable("some random code"))
 
-    def test_apply_patches_both(self):
-        new_content, result = self.patch.apply(SAMPLE_FULL)
-        self.assertTrue(result.applied)
-        self.assertEqual(result.replacements, 2)
-        self.assertIn("CGP_PATCH_AUTORUN_WORKBENCH", new_content)
-        # Default should be patched: isDisabledByAdmin !0 → !1
-        self.assertIn("isAdminControlled:!1,isDisabledByAdmin:!1", new_content)
-        # Computed should be simplified, isAdminControlled flipped to !1
-        self.assertNotIn("v.length+w.length===0", new_content)
-        self.assertNotIn("isAdminControlled:!0", new_content)
-        # Old default value gone
-        self.assertNotIn("isDisabledByAdmin:!0", new_content)
-
-    def test_apply_default_only(self):
-        content = f"prefix;{SAMPLE_DEFAULT};suffix"
-        new_content, result = self.patch.apply(content)
+    def test_apply_disables_enabled_check(self):
+        new_content, result = self.patch.apply(SAMPLE)
         self.assertTrue(result.applied)
         self.assertEqual(result.replacements, 1)
         self.assertIn("CGP_PATCH_AUTORUN_WORKBENCH", new_content)
-        self.assertIn("isAdminControlled:!1,isDisabledByAdmin:!1", new_content)
+        # The enabled check should be replaced with !1 (false)
+        self.assertNotIn("r?.autoRunControls?.enabled", new_content)
+        self.assertIn("const s=!1/* CGP_PATCH_AUTORUN_WORKBENCH */;", new_content)
 
-    def test_apply_computed_only(self):
-        content = f"prefix;o={{{SAMPLE_COMPUTED},extra:1}};suffix"
-        new_content, result = self.patch.apply(content)
+    def test_apply_preserves_surrounding_code(self):
+        new_content, result = self.patch.apply(SAMPLE)
         self.assertTrue(result.applied)
-        self.assertEqual(result.replacements, 1)
-        self.assertIn("CGP_PATCH_AUTORUN_WORKBENCH", new_content)
-        self.assertNotIn("v.length+w.length===0", new_content)
-        self.assertNotIn("isAdminControlled:!0", new_content)
-        self.assertIn("isAdminControlled:!1,isDisabledByAdmin:!1", new_content)
+        self.assertIn("prefix;", new_content)
+        self.assertIn(";suffix", new_content)
+        # The if(s) branch is still there, just s is always false
+        self.assertIn("if(s){", new_content)
 
     def test_idempotent(self):
-        new_content, result1 = self.patch.apply(SAMPLE_FULL)
+        new_content, result1 = self.patch.apply(SAMPLE)
         self.assertTrue(result1.applied)
 
         new_content2, result2 = self.patch.apply(new_content)
