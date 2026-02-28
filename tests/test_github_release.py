@@ -310,7 +310,8 @@ class TestDownloadAndInstallBundle:
                 raise RuntimeError("network down")
             return data
 
-        with mock.patch.dict(os.environ, {"CGP_ALLOW_INSECURE_UPDATE": "1"}, clear=False):
+        with mock.patch.dict(os.environ, {"CGP_ALLOW_INSECURE_UPDATE": "1"}, clear=False), \
+             mock.patch("cursor_gui_patch.github_release.sys.platform", "linux"):
             result = download_and_install_release_bundle(
                 repo="owner/repo",
                 tag="v0.1.0",
