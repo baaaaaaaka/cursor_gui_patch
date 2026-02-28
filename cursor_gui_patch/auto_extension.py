@@ -8,13 +8,36 @@ import os
 import shutil
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Optional
 
 from . import __version__
+from .discovery import _is_wsl
 
 EXTENSION_NAME = "cgp-auto-patcher"
+EXTENSION_ID = f"cgp.{EXTENSION_NAME}"
 GITHUB_REPO = "baaaaaaaka/cursor_gui_patch"
+
+
+def _wsl_gui_extensions_root() -> Optional[Path]:
+    """Find the Windows Cursor extensions directory from within WSL."""
+    users_dir = Path("/mnt/c/Users")
+    if not users_dir.is_dir():
+        return None
+    skip = {"Public", "Default", "Default User", "All Users"}
+    try:
+        for user_dir in sorted(users_dir.iterdir()):
+            if user_dir.name.startswith(".") or user_dir.name in skip:
+                continue
+            if not user_dir.is_dir():
+                continue
+            ext_dir = user_dir / ".cursor" / "extensions"
+            if ext_dir.is_dir():
+                return ext_dir
+    except PermissionError:
+        pass
+    return None
 
 
 def _extensions_root(target: str) -> Path:
@@ -26,6 +49,11 @@ def _extensions_root(target: str) -> Path:
         return Path.home() / ".cursor" / "extensions"
     if sys.platform == "win32":
         return Path(os.environ.get("USERPROFILE", "~")) / ".cursor" / "extensions"
+    # Linux — check for WSL (Windows Cursor reads from Windows filesystem)
+    if _is_wsl():
+        wsl_root = _wsl_gui_extensions_root()
+        if wsl_root:
+            return wsl_root
     return Path.home() / ".cursor" / "extensions"
 
 
@@ -264,6 +292,90 @@ def _generate_extension_js() -> str:
     """)
 
 
+def _to_vscode_uri_path(p: Path) -> str:
+    """Convert a filesystem path to a VS Code file URI path component.
+
+    Examples:
+        /mnt/c/Users/x/.cursor/ext  → /c:/Users/x/.cursor/ext   (WSL)
+        C:\\Users\\x\\.cursor\\ext   → /c:/Users/x/.cursor/ext   (Windows)
+        /home/x/.cursor/ext          → /home/x/.cursor/ext       (Linux/macOS)
+    """
+    s = p.as_posix()
+    # WSL: /mnt/c/... → /c:/...
+    if s.startswith("/mnt/") and len(s) > 6 and s[6] == "/":
+        drive = s[5]
+        return f"/{drive}:{s[6:]}"
+    # Native Windows: C:/... → /c:/...
+    if len(s) >= 2 and s[1] == ":":
+        return f"/{s[0].lower()}:{s[2:]}"
+    return s
+
+
+def _make_registry_entry(version: str, ext_dir: Path) -> dict:
+    """Build an extensions.json entry for our extension."""
+    return {
+        "identifier": {"id": EXTENSION_ID},
+        "version": version,
+        "location": {
+            "$mid": 1,
+            "path": _to_vscode_uri_path(ext_dir),
+            "scheme": "file",
+        },
+        "relativeLocation": _ext_dir_name(version),
+        "metadata": {
+            "isApplicationScoped": False,
+            "isMachineScoped": False,
+            "isBuiltin": False,
+            "installedTimestamp": int(time.time() * 1000),
+            "pinned": True,
+            "source": "vsix",
+        },
+    }
+
+
+def _read_extensions_json(extensions_root: Path) -> list:
+    """Read and parse extensions.json, returning [] on any error."""
+    json_path = extensions_root / "extensions.json"
+    if not json_path.is_file():
+        return []
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _write_extensions_json(extensions_root: Path, entries: list) -> None:
+    """Write entries list to extensions.json."""
+    json_path = extensions_root / "extensions.json"
+    json_path.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def _register_extension(extensions_root: Path, version: str, ext_dir: Path) -> None:
+    """Add or update the extension entry in extensions.json."""
+    entries = _read_extensions_json(extensions_root)
+    # Remove any existing cgp-auto-patcher entries
+    entries = [
+        e for e in entries
+        if e.get("identifier", {}).get("id") != EXTENSION_ID
+    ]
+    entries.append(_make_registry_entry(version, ext_dir))
+    _write_extensions_json(extensions_root, entries)
+
+
+def _unregister_extension(extensions_root: Path) -> None:
+    """Remove the extension entry from extensions.json."""
+    entries = _read_extensions_json(extensions_root)
+    if not entries:
+        return
+    new_entries = [
+        e for e in entries
+        if e.get("identifier", {}).get("id") != EXTENSION_ID
+    ]
+    if len(new_entries) != len(entries):
+        _write_extensions_json(extensions_root, new_entries)
+
+
 def install(
     target: str = "gui",
     *,
@@ -275,7 +387,7 @@ def install(
 
     ext_dir = root / _ext_dir_name(version)
 
-    # Clean up older versions
+    # Clean up older versions (directories + registry entries)
     for old in _find_existing(root):
         if old != ext_dir:
             shutil.rmtree(old, ignore_errors=True)
@@ -288,6 +400,9 @@ def install(
 
     # Write extension.js
     (ext_dir / "extension.js").write_text(_generate_extension_js(), encoding="utf-8")
+
+    # Register in extensions.json so Cursor discovers the extension
+    _register_extension(root, version, ext_dir)
 
     return f"Installed {EXTENSION_NAME} v{version} to {ext_dir}"
 
@@ -302,10 +417,13 @@ def uninstall(
 
     existing = _find_existing(root)
     if not existing:
+        _unregister_extension(root)  # clean up orphan registry entries
         return f"{EXTENSION_NAME} is not installed ({target})"
 
     for d in existing:
         shutil.rmtree(d, ignore_errors=True)
+
+    _unregister_extension(root)
 
     return f"Uninstalled {EXTENSION_NAME} from {root}"
 
