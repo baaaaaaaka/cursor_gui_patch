@@ -215,7 +215,7 @@ class TestGuiCandidates:
     def test_darwin_returns_app_bundle_paths(self, mock_sys):
         mock_sys.platform = "darwin"
         candidates = _gui_candidates()
-        paths = [str(c) for c in candidates]
+        paths = [c.as_posix() for c in candidates]
         assert any("Cursor.app/Contents/Resources/app" in p for p in paths)
         assert len(candidates) == 2
 
@@ -224,7 +224,7 @@ class TestGuiCandidates:
     def test_win32_returns_program_paths(self, mock_sys):
         mock_sys.platform = "win32"
         candidates = _gui_candidates()
-        paths = [str(c) for c in candidates]
+        paths = [c.as_posix() for c in candidates]
         assert any("cursor" in p.lower() and "resources" in p for p in paths)
         assert len(candidates) == 2
 
@@ -240,7 +240,7 @@ class TestGuiCandidates:
     def test_linux_returns_standard_paths(self, mock_sys, _):
         mock_sys.platform = "linux"
         candidates = _gui_candidates()
-        paths = [str(c) for c in candidates]
+        paths = [c.as_posix() for c in candidates]
         assert any("/opt/cursor" in p for p in paths)
         assert any("/usr/share/cursor" in p for p in paths)
         assert any("/snap/cursor" in p for p in paths)
@@ -256,7 +256,7 @@ class TestGuiCandidates:
     def test_linux_wsl_appends_windows_paths(self, mock_sys, _, __):
         mock_sys.platform = "linux"
         candidates = _gui_candidates()
-        paths = [str(c) for c in candidates]
+        paths = [c.as_posix() for c in candidates]
         # Should include both Linux standard paths AND WSL Windows paths
         assert any("/opt/cursor" in p for p in paths)
         assert any("/mnt/c/" in p for p in paths)
