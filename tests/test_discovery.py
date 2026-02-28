@@ -13,11 +13,15 @@ from unittest import mock
 from cursor_gui_patch.discovery import (
     CursorInstallation,
     EXTENSION_TARGETS,
+    _choose_wsl_user_dir,
     _get_server_data_folder_name,
     _gui_candidates,
     _is_cursor_app_root,
     _is_wsl,
+    _safe_relative_folder_name,
+    _preferred_windows_usernames,
     _version_id_from_path,
+    _wsl_user_dirs,
     discover_all,
     discover_gui_installations,
     discover_server_installations,
@@ -262,6 +266,55 @@ class TestGuiCandidates:
         assert any("/mnt/c/" in p for p in paths)
 
 
+class TestWslUserSelection:
+    def test_preferred_windows_usernames(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CGP_WINDOWS_USER": "WinUser",
+                "USERNAME": "Other",
+                "USER": "linux",
+            },
+            clear=True,
+        ):
+            names = _preferred_windows_usernames()
+        assert names[0] == "winuser"
+        assert "other" in names
+        assert "linux" in names
+
+    def test_wsl_user_dirs_skips_system_users(self, tmp_path: Path):
+        users = tmp_path / "Users"
+        (users / "Public").mkdir(parents=True)
+        (users / "Default").mkdir()
+        (users / "alice").mkdir()
+        (users / "bob").mkdir()
+        found = _wsl_user_dirs(users)
+        names = [p.name for p in found]
+        assert names == ["alice", "bob"]
+
+    def test_choose_wsl_user_dir_prefers_env_user(self, tmp_path: Path):
+        users = [tmp_path / "alice", tmp_path / "bob"]
+        with mock.patch.dict(os.environ, {"CGP_WINDOWS_USER": "bob"}, clear=True):
+            chosen = _choose_wsl_user_dir(users)
+        assert chosen == tmp_path / "bob"
+
+    def test_choose_wsl_user_dir_ambiguous_without_preference(self, tmp_path: Path):
+        users = [tmp_path / "alice", tmp_path / "bob"]
+        with mock.patch.dict(os.environ, {}, clear=True):
+            chosen = _choose_wsl_user_dir(users)
+        assert chosen == tmp_path / "alice"
+
+    def test_safe_relative_folder_name_valid(self):
+        assert _safe_relative_folder_name(".cursor-server") == ".cursor-server"
+        assert _safe_relative_folder_name("cursor/server") == "cursor/server"
+
+    def test_safe_relative_folder_name_rejects_unsafe(self):
+        assert _safe_relative_folder_name("/abs/path") is None
+        assert _safe_relative_folder_name("../escape") is None
+        assert _safe_relative_folder_name("a/../b") is None
+        assert _safe_relative_folder_name("C:\\abs\\path") is None
+
+
 class TestDiscoverServerAutoDiscover:
     def test_finds_installation_in_cursor_server_bin(self, tmp_path: Path):
         server_root = tmp_path / ".cursor-server" / "bin" / "abc123"
@@ -313,6 +366,38 @@ class TestDiscoverServerAutoDiscover:
             results = discover_server_installations()
 
         assert len(results) == 0
+
+    def test_uses_server_data_folder_name_from_gui_product_json(self, tmp_path: Path):
+        gui_root = tmp_path / "gui-app"
+        gui_root.mkdir(parents=True)
+        (gui_root / "product.json").write_text(json.dumps({
+            "applicationName": "cursor",
+            "serverDataFolderName": ".cursor-server-custom",
+        }))
+
+        server_root = tmp_path / ".cursor-server-custom" / "bin" / "abc123"
+        _make_fake_installation(server_root)
+
+        with mock.patch("pathlib.Path.home", return_value=tmp_path), \
+             mock.patch("cursor_gui_patch.discovery._gui_candidates", return_value=[gui_root]):
+            results = discover_server_installations()
+
+        assert len(results) == 1
+        assert results[0].root == server_root
+
+    def test_ignores_unsafe_server_data_folder_name(self, tmp_path: Path):
+        gui_root = tmp_path / "gui-app"
+        gui_root.mkdir(parents=True)
+        (gui_root / "product.json").write_text(json.dumps({
+            "applicationName": "cursor",
+            "serverDataFolderName": "../outside",
+        }))
+
+        with mock.patch("pathlib.Path.home", return_value=tmp_path), \
+             mock.patch("cursor_gui_patch.discovery._gui_candidates", return_value=[gui_root]):
+            results = discover_server_installations()
+
+        assert results == []
 
 
 class TestDiscoverGuiAutoDiscover:

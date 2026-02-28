@@ -83,6 +83,12 @@ class TestGenerateExtensionJs:
         assert "302" in js
         assert "redirects" in js
 
+    def test_windows_install_uses_copy_fallback(self):
+        js = _generate_extension_js()
+        assert "fs.cpSync" in js
+        assert "fs.copyFileSync" in js
+        assert "fs.statSync" in js
+
 
 class TestExtensionsRoot:
     """Test _extensions_root() for all platform / target combinations."""

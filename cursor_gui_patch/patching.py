@@ -73,6 +73,8 @@ def _patch_installation(
     only_patches: Optional[Set[str]],
 ) -> None:
     """Apply patches to a single installation."""
+    errors_before_install = len(report.errors)
+
     # Load cache
     cache_data: Optional[Dict[str, Dict[str, Any]]] = None
     new_cache: Optional[Dict[str, Dict[str, Any]]] = None
@@ -119,8 +121,12 @@ def _patch_installation(
         if out_files:
             _update_product_json_checksums(inst, out_files, report)
 
+    # Roll back this installation if any errors happened after writes.
+    if not dry_run and len(report.errors) > errors_before_install and len(report.patched) > patched_before:
+        _rollback_installation_changes(inst, report, patched_from=patched_before)
+
     # Save cache
-    if new_cache is not None:
+    if new_cache is not None and len(report.errors) == errors_before_install:
         try:
             ca.save_cache(inst.root, new_cache)
         except Exception:
@@ -128,6 +134,42 @@ def _patch_installation(
 
 
 _EXT_HOST_RELPATH = Path("out/vs/workbench/api/node/extensionHostProcess.js")
+
+
+def _rollback_installation_changes(
+    inst: CursorInstallation,
+    report: PatchReport,
+    *,
+    patched_from: int,
+) -> None:
+    """Best-effort rollback of files modified during this installation patch run."""
+    restore_paths: List[Path] = []
+    restore_paths.extend(report.patched[patched_from:])
+    restore_paths.extend([inst.root / _EXT_HOST_RELPATH, inst.root / "product.json"])
+
+    seen: Set[Path] = set()
+    for p in restore_paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        if not bak.has_backup(p):
+            continue
+        try:
+            if not bak.restore_backup(p):
+                report.errors.append((p, "rollback restore failed"))
+        except Exception as e:
+            report.errors.append((p, f"rollback restore failed: {e}"))
+
+    # These paths are no longer considered patched after rollback.
+    del report.patched[patched_from:]
+
+    # Cache may contain stale "patched" states; drop it.
+    try:
+        cache_file = ca.cache_path(inst.root)
+        if cache_file.exists():
+            cache_file.unlink()
+    except Exception:
+        pass
 
 
 def _update_extension_host_hashes(
@@ -157,7 +199,9 @@ def _update_extension_host_hashes(
         # No hashes were found/replaced — nothing to do
         return False
 
-    bak.create_backup(ext_host)
+    if bak.create_backup(ext_host) is None:
+        report.errors.append((ext_host, "backup failed"))
+        return False
 
     try:
         ext_host.write_bytes(content.encode("utf-8"))
@@ -218,7 +262,9 @@ def _update_product_json_checksums(
     if not updated:
         return
 
-    bak.create_backup(product_json)
+    if bak.create_backup(product_json) is None:
+        report.errors.append((product_json, "backup failed"))
+        return
 
     try:
         # Write back with compact separators to match original Cursor format
@@ -330,7 +376,9 @@ def _patch_target(
     old_hash = hashlib.sha256(original_bytes).hexdigest()
 
     # Create backup (idempotent)
-    bak.create_backup(path)
+    if bak.create_backup(path) is None:
+        report.errors.append((path, "backup failed"))
+        return None
 
     # Write patched content
     if st is None:

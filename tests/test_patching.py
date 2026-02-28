@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Dict, Optional
+from unittest import mock
 
 import base64
 
@@ -120,6 +121,21 @@ class TestPatch(unittest.TestCase):
             report2 = patch(installations=[inst])
             self.assertGreater(report2.skipped_cached, 0)
             self.assertEqual(len(report2.patched), 0)
+
+    def test_patch_aborts_when_backup_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            before = {t.path: t.path.read_text() for t in inst.target_files()}
+
+            with mock.patch("cursor_gui_patch.patching.bak.create_backup", return_value=None):
+                report = patch(installations=[inst], force=True)
+
+            self.assertFalse(report.ok)
+            self.assertEqual(len(report.patched), 0)
+            self.assertGreaterEqual(len(report.errors), 1)
+            for p, original in before.items():
+                self.assertEqual(p.read_text(), original)
 
 
 class TestUnpatch(unittest.TestCase):
@@ -278,6 +294,36 @@ class TestExtensionHostHashes(unittest.TestCase):
             patch(installations=[inst])
             self.assertEqual(ext_host.read_text(), original)
             self.assertFalse(has_backup(ext_host))
+
+    def test_ext_host_not_written_when_backup_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            ext_host = _add_ext_host_with_hashes(root, contents)
+            original_ext_host = ext_host.read_text()
+            originals = {t.path: t.path.read_text() for t in inst.target_files()}
+
+            from cursor_gui_patch import patching as patching_module
+            real_create_backup = patching_module.bak.create_backup
+
+            def fake_create_backup(path: Path):
+                if path == ext_host:
+                    return None
+                return real_create_backup(path)
+
+            with mock.patch("cursor_gui_patch.patching.bak.create_backup", side_effect=fake_create_backup):
+                report = patch(installations=[inst], force=True)
+
+            self.assertFalse(report.ok)
+            self.assertEqual(len(report.patched), 0)
+            self.assertEqual(ext_host.read_text(), original_ext_host)
+            for p, original in originals.items():
+                self.assertEqual(p.read_text(), original)
+            self.assertTrue(any(p == ext_host and "backup failed" in msg for p, msg in report.errors))
 
 
 def _add_workbench_file(root: Path, content: str = WORKBENCH_CONTENT) -> Path:
@@ -475,6 +521,45 @@ class TestProductJsonChecksums(unittest.TestCase):
             patch(installations=[inst])
             # product.json should not have a backup (no checksums to update)
             self.assertFalse(has_backup(product_json))
+
+    def test_product_json_not_written_when_backup_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            contents = {
+                "cursor-agent-exec": AUTORUN_CONTENT,
+                "cursor-always-local": MODELS_CONTENT,
+            }
+            inst = _make_test_installation(root, contents)
+            ext_host = _add_ext_host_with_hashes(root, contents)
+            wb = _add_workbench_file(root)
+
+            out_dir = root / "out"
+            _add_product_json_with_checksums(root, {
+                ext_host.relative_to(out_dir).as_posix(): ext_host,
+                wb.relative_to(out_dir).as_posix(): wb,
+            })
+
+            product_json = root / "product.json"
+            original = product_json.read_bytes()
+            originals = {t.path: t.path.read_text() for t in inst.target_files()}
+
+            from cursor_gui_patch import patching as patching_module
+            real_create_backup = patching_module.bak.create_backup
+
+            def fake_create_backup(path: Path):
+                if path == product_json:
+                    return None
+                return real_create_backup(path)
+
+            with mock.patch("cursor_gui_patch.patching.bak.create_backup", side_effect=fake_create_backup):
+                report = patch(installations=[inst], force=True)
+
+            self.assertFalse(report.ok)
+            self.assertEqual(len(report.patched), 0)
+            self.assertEqual(product_json.read_bytes(), original)
+            for p, original_content in originals.items():
+                self.assertEqual(p.read_text(), original_content)
+            self.assertTrue(any(p == product_json and "backup failed" in msg for p, msg in report.errors))
 
 
 if __name__ == "__main__":

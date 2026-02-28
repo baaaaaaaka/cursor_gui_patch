@@ -487,24 +487,34 @@ def _download_and_verify(
     """Download an asset and optionally verify its checksum."""
     url = build_release_download_url(repo, tag=tag, asset_name=asset_name)
     data = fetch(url, timeout_s, _http_headers())
+    allow_insecure = bool(os.environ.get("CGP_ALLOW_INSECURE_UPDATE"))
 
-    checksums: Dict[str, str] = {}
     if verify_checksums:
+        c_url = build_checksums_download_url(repo, tag=tag)
         try:
-            c_url = build_checksums_download_url(repo, tag=tag)
             c_raw = fetch(c_url, timeout_s, _http_headers())
-            checksums = parse_checksums_txt(c_raw.decode("utf-8", "replace"))
-        except Exception:
-            checksums = {}
+        except Exception as e:
+            if allow_insecure:
+                return data
+            raise RuntimeError(f"failed to fetch checksums.txt: {e}") from e
 
-    if verify_checksums and checksums:
+        checksums = parse_checksums_txt(c_raw.decode("utf-8", "replace"))
+        if not checksums:
+            if allow_insecure:
+                return data
+            raise RuntimeError("checksums.txt is empty or invalid")
+
         expected = checksums.get(asset_name)
-        if expected:
-            actual = hashlib.sha256(data).hexdigest()
-            if actual.lower() != expected.lower():
-                raise RuntimeError(
-                    f"checksum mismatch for {asset_name}: expected {expected}, got {actual}"
-                )
+        if not expected:
+            if allow_insecure:
+                return data
+            raise RuntimeError(f"checksums.txt missing entry for {asset_name}")
+
+        actual = hashlib.sha256(data).hexdigest()
+        if actual.lower() != expected.lower():
+            raise RuntimeError(
+                f"checksum mismatch for {asset_name}: expected {expected}, got {actual}"
+            )
 
     return data
 

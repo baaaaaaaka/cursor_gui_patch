@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import __version__
-from .discovery import _is_wsl
+from .discovery import _is_wsl, _ordered_wsl_user_dirs, _wsl_user_dirs
 
 EXTENSION_NAME = "cgp-auto-patcher"
 EXTENSION_ID = f"cgp.{EXTENSION_NAME}"
@@ -25,18 +25,11 @@ def _wsl_gui_extensions_root() -> Optional[Path]:
     users_dir = Path("/mnt/c/Users")
     if not users_dir.is_dir():
         return None
-    skip = {"Public", "Default", "Default User", "All Users"}
-    try:
-        for user_dir in sorted(users_dir.iterdir()):
-            if user_dir.name.startswith(".") or user_dir.name in skip:
-                continue
-            if not user_dir.is_dir():
-                continue
-            ext_dir = user_dir / ".cursor" / "extensions"
-            if ext_dir.is_dir():
-                return ext_dir
-    except PermissionError:
-        pass
+
+    for user_dir in _ordered_wsl_user_dirs(_wsl_user_dirs(users_dir)):
+        ext_dir = user_dir / ".cursor" / "extensions"
+        if ext_dir.is_dir():
+            return ext_dir
     return None
 
 
@@ -191,16 +184,26 @@ def _generate_extension_js() -> str:
                     try { fs.chmodSync(exePath, 0o755); } catch (_) {}
                 }
 
-                // Create current symlink
+                // Create current and bin links/copies.
                 const currentLink = path.join(installRoot, 'current');
+                const binLink = path.join(binDir, exeName);
+                if (process.platform === 'win32') {
+                    // Windows users often cannot create symlinks without admin/dev mode.
+                    // Use copy fallback so installation is still usable.
+                    try { fs.rmSync(currentLink, { recursive: true, force: true }); } catch (_) {}
+                    try { fs.cpSync(versionDir, currentLink, { recursive: true }); } catch (_) {}
+                    const currentExe = path.join(currentLink, exeName);
+                    try { fs.copyFileSync(currentExe, binLink); } catch (_) {}
+                    let binOk = false;
+                    try { binOk = fs.existsSync(binLink) && fs.statSync(binLink).isFile(); } catch (_) {}
+                    return binOk ? binLink : currentExe;
+                }
+
+                // Unix: prefer symlinks for fast upgrades.
                 try { fs.unlinkSync(currentLink); } catch (_) {}
                 try { fs.symlinkSync(versionDir, currentLink); } catch (_) {}
-
-                // Create bin symlink
-                const binLink = path.join(binDir, exeName);
                 try { fs.unlinkSync(binLink); } catch (_) {}
                 try { fs.symlinkSync(exePath, binLink); } catch (_) {}
-
                 return binLink;
             } finally {
                 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}

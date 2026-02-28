@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -27,6 +28,8 @@ WORKBENCH_TARGETS: Dict[str, Dict[str, object]] = {
         "patches": ["autorun_workbench"],
     },
 }
+
+_WSL_SKIP_USERS = {"public", "default", "default user", "all users"}
 
 
 @dataclass
@@ -108,6 +111,104 @@ def _get_server_data_folder_name(app_root: Path) -> str:
         return ".cursor-server"
 
 
+def _preferred_windows_usernames() -> List[str]:
+    """Return lowercase preferred Windows usernames from env vars."""
+    names: List[str] = []
+    seen = set()
+    for key in ("CGP_WINDOWS_USER", "WSL_WINDOWS_USER", "USERNAME", "USER", "LOGNAME"):
+        raw = os.environ.get(key)
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip().strip("\\/")
+        if not value:
+            continue
+        # Allow DOMAIN\\user or /path/like/value forms.
+        value = value.split("\\")[-1].split("/")[-1]
+        low = value.lower()
+        if low not in seen:
+            seen.add(low)
+            names.append(low)
+    return names
+
+
+def _ordered_wsl_user_dirs(user_dirs: Sequence[Path]) -> List[Path]:
+    """Order WSL Windows user dirs: preferred usernames first, then others."""
+    if not user_dirs:
+        return []
+
+    preferred = _preferred_windows_usernames()
+    ordered: List[Path] = []
+    seen = set()
+
+    if preferred:
+        by_name: Dict[str, List[Path]] = {}
+        for p in user_dirs:
+            by_name.setdefault(p.name.lower(), []).append(p)
+        for name in preferred:
+            for p in by_name.get(name, []):
+                key = str(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(p)
+
+    for p in user_dirs:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(p)
+
+    return ordered
+
+
+def _wsl_user_dirs(users_dir: Path) -> List[Path]:
+    """List non-system user directories under /mnt/c/Users."""
+    out: List[Path] = []
+    try:
+        for user_dir in sorted(users_dir.iterdir()):
+            if not user_dir.is_dir():
+                continue
+            name = user_dir.name.strip().lower()
+            if not name or name.startswith(".") or name in _WSL_SKIP_USERS:
+                continue
+            out.append(user_dir)
+    except PermissionError:
+        pass
+    return out
+
+
+def _choose_wsl_user_dir(user_dirs: Sequence[Path]) -> Optional[Path]:
+    """Choose a Windows user directory in WSL (preferred names first)."""
+    ordered = _ordered_wsl_user_dirs(user_dirs)
+    if not ordered:
+        return None
+    return ordered[0]
+
+
+_RE_WIN_DRIVE_ABS = re.compile(r"^[a-zA-Z]:[\\/]")
+
+
+def _safe_relative_folder_name(raw: str) -> Optional[str]:
+    """Validate and normalize a relative folder name used under home/."""
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if _RE_WIN_DRIVE_ABS.match(s):
+        return None
+    s = s.replace("\\", "/")
+    if s.startswith("/"):
+        return None
+    parts = [p for p in s.split("/") if p and p != "."]
+    if not parts:
+        return None
+    if any(p == ".." for p in parts):
+        return None
+    return "/".join(parts)
+
+
 def discover_server_installations(
     *,
     explicit_dir: Optional[str] = None,
@@ -116,7 +217,6 @@ def discover_server_installations(
     results: List[CursorInstallation] = []
 
     # Priority: explicit arg > env var > auto-discover
-    candidates: List[Path] = []
 
     explicit = explicit_dir or os.environ.get(ENV_CURSOR_SERVER_DIR)
     if explicit:
@@ -129,10 +229,17 @@ def discover_server_installations(
             ))
         return results
 
-    # Auto-discover: enumerate ~/.cursor-server/bin/<hash>/
-    # We try common data folder names
+    # Auto-discover: enumerate ~/<serverDataFolderName>/bin/<hash>/.
+    # Start with default then augment from discovered GUI product.json files.
+    folder_names = {".cursor-server"}
+    for gui_root in _gui_candidates():
+        if gui_root.is_dir() and _is_cursor_app_root(gui_root):
+            folder = _safe_relative_folder_name(_get_server_data_folder_name(gui_root))
+            if folder:
+                folder_names.add(folder)
+
     home = Path.home()
-    for folder_name in (".cursor-server",):
+    for folder_name in sorted(folder_names):
         bin_dir = home / folder_name / "bin"
         if not bin_dir.is_dir():
             continue
@@ -202,16 +309,10 @@ def _wsl_gui_candidates() -> List[Path]:
     users_dir = mnt_c / "Users"
     if not users_dir.is_dir():
         return candidates
-    try:
-        for user_dir in users_dir.iterdir():
-            if user_dir.name.startswith(".") or user_dir.name in ("Public", "Default", "Default User", "All Users"):
-                continue
-            if not user_dir.is_dir():
-                continue
-            candidate = user_dir / "AppData" / "Local" / "Programs" / "cursor" / "resources" / "app"
-            candidates.append(candidate)
-    except PermissionError:
-        pass
+
+    for user_dir in _ordered_wsl_user_dirs(_wsl_user_dirs(users_dir)):
+        candidate = user_dir / "AppData" / "Local" / "Programs" / "cursor" / "resources" / "app"
+        candidates.append(candidate)
     return candidates
 
 

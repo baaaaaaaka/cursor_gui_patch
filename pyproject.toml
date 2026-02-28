@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cursor-gui-patch"
-version = "0.1.7"
+version = "0.1.8"
 description = "Patch tool for Cursor GUI & Server (model enumeration + auto-run controls)"
 requires-python = ">=3.9"
 license = "MIT"

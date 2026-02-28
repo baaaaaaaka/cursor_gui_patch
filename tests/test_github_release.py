@@ -283,6 +283,84 @@ class TestDownloadAndInstallBundle:
                 verify_checksums=False,
             )
 
+    def test_checksum_fetch_failure_fails_closed(self, tmp_path: Path):
+        data = self._make_tar_gz()
+
+        def fake_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+            if "checksums.txt" in url:
+                raise RuntimeError("network down")
+            return data
+
+        with pytest.raises(RuntimeError, match="failed to fetch checksums.txt"):
+            download_and_install_release_bundle(
+                repo="owner/repo",
+                tag="v0.1.0",
+                asset_name="cgp-linux-x86_64.tar.gz",
+                install_root=tmp_path / "root",
+                bin_dir=tmp_path / "bin",
+                fetch=fake_fetch,
+                verify_checksums=True,
+            )
+
+    def test_checksum_fetch_failure_allowed_with_env_override(self, tmp_path: Path):
+        data = self._make_tar_gz()
+
+        def fake_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+            if "checksums.txt" in url:
+                raise RuntimeError("network down")
+            return data
+
+        with mock.patch.dict(os.environ, {"CGP_ALLOW_INSECURE_UPDATE": "1"}, clear=False):
+            result = download_and_install_release_bundle(
+                repo="owner/repo",
+                tag="v0.1.0",
+                asset_name="cgp-linux-x86_64.tar.gz",
+                install_root=tmp_path / "root",
+                bin_dir=tmp_path / "bin",
+                fetch=fake_fetch,
+                verify_checksums=True,
+            )
+
+        assert result.exists()
+
+    def test_checksum_missing_asset_entry_fails(self, tmp_path: Path):
+        data = self._make_tar_gz()
+
+        def fake_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+            if "checksums.txt" in url:
+                return (("a" * 64) + "  some-other-file.tar.gz\n").encode("utf-8")
+            return data
+
+        with pytest.raises(RuntimeError, match="missing entry"):
+            download_and_install_release_bundle(
+                repo="owner/repo",
+                tag="v0.1.0",
+                asset_name="cgp-linux-x86_64.tar.gz",
+                install_root=tmp_path / "root",
+                bin_dir=tmp_path / "bin",
+                fetch=fake_fetch,
+                verify_checksums=True,
+            )
+
+    def test_checksum_mismatch_fails(self, tmp_path: Path):
+        data = self._make_tar_gz()
+
+        def fake_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
+            if "checksums.txt" in url:
+                return (("f" * 64) + "  cgp-linux-x86_64.tar.gz\n").encode("utf-8")
+            return data
+
+        with pytest.raises(RuntimeError, match="checksum mismatch"):
+            download_and_install_release_bundle(
+                repo="owner/repo",
+                tag="v0.1.0",
+                asset_name="cgp-linux-x86_64.tar.gz",
+                install_root=tmp_path / "root",
+                bin_dir=tmp_path / "bin",
+                fetch=fake_fetch,
+                verify_checksums=True,
+            )
+
 
 class TestRuntimeVersion:
     def test_read_existing(self, tmp_path: Path):
