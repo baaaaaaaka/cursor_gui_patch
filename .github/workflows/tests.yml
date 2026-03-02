@@ -25,3 +25,49 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v
+
+  linux-distro-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { distro: ubuntu-20.04, image: "ubuntu:20.04", python_cmd: "python3.9" }
+          - { distro: ubuntu-22.04, image: "ubuntu:22.04", python_cmd: "python3" }
+          - { distro: rocky-8, image: "rockylinux:8", python_cmd: "python3.9" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests in ${{ matrix.distro }} container
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euxo pipefail
+              if [ "${{ matrix.distro }}" = "ubuntu-20.04" ]; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                  software-properties-common curl ca-certificates git tar gzip >/dev/null 2>&1
+                add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                  python3.9 python3.9-distutils >/dev/null 2>&1
+                curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3.9 >/dev/null 2>&1
+              elif command -v apt-get >/dev/null 2>&1; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                  python3 python3-pip git tar gzip >/dev/null 2>&1
+              elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y -q python39 python39-pip git tar gzip >/dev/null 2>&1
+              fi
+
+              PY="${{ matrix.python_cmd }}"
+              "$PY" -m pip install -U pip
+              "$PY" -m pip install -e . pytest
+              "$PY" -m pytest tests/ -q
+              "$PY" -m cursor_gui_patch --version
+            '

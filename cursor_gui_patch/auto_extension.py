@@ -18,6 +18,9 @@ from .discovery import _is_wsl, _ordered_wsl_user_dirs, _wsl_user_dirs
 EXTENSION_NAME = "cgp-auto-patcher"
 EXTENSION_ID = f"cgp.{EXTENSION_NAME}"
 GITHUB_REPO = "baaaaaaaka/cursor_gui_patch"
+RELOAD_MODES = {"prompt", "auto", "off"}
+DEFAULT_RELOAD_MODE = "prompt"
+DEFAULT_RELOAD_DELAY_MS = 1200
 
 
 def _wsl_gui_extensions_root() -> Optional[Path]:
@@ -60,7 +63,29 @@ def _find_existing(extensions_root: Path) -> list[Path]:
     return sorted(Path(p) for p in glob.glob(pattern) if Path(p).is_dir())
 
 
-def _generate_package_json(version: str) -> str:
+def _normalize_reload_mode(reload_mode: str) -> str:
+    mode = (reload_mode or "").strip().lower()
+    if mode not in RELOAD_MODES:
+        allowed = ", ".join(sorted(RELOAD_MODES))
+        raise ValueError(f"Invalid reload mode: {reload_mode!r}. Expected one of: {allowed}")
+    return mode
+
+
+def _normalize_reload_delay_ms(reload_delay_ms: int) -> int:
+    value = int(reload_delay_ms)
+    if value < 0:
+        raise ValueError("reload_delay_ms must be >= 0")
+    return value
+
+
+def _generate_package_json(
+    version: str,
+    *,
+    reload_mode: str = DEFAULT_RELOAD_MODE,
+    reload_delay_ms: int = DEFAULT_RELOAD_DELAY_MS,
+) -> str:
+    mode = _normalize_reload_mode(reload_mode)
+    delay_ms = _normalize_reload_delay_ms(reload_delay_ms)
     return json.dumps(
         {
             "name": EXTENSION_NAME,
@@ -72,6 +97,28 @@ def _generate_package_json(version: str) -> str:
             "extensionKind": ["workspace"],
             "activationEvents": ["onStartupFinished"],
             "main": "./extension.js",
+            "contributes": {
+                "configuration": {
+                    "title": "CGP Auto Patcher",
+                    "properties": {
+                        "cgp.autoPatcher.reloadMode": {
+                            "type": "string",
+                            "enum": ["prompt", "auto", "off"],
+                            "default": mode,
+                            "description": (
+                                "Reload behavior after cgp patches files. "
+                                "prompt=ask, auto=reload automatically, off=never reload."
+                            ),
+                        },
+                        "cgp.autoPatcher.reloadDelayMs": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": delay_ms,
+                            "description": "Delay before auto reload (milliseconds).",
+                        },
+                    },
+                },
+            },
         },
         indent=2,
     )
@@ -87,9 +134,10 @@ def _generate_extension_js() -> str:
         const fs = require('fs');
         const path = require('path');
         const os = require('os');
-        const zlib = require('zlib');
 
         const REPO = '""" + GITHUB_REPO + """';
+        const DOWNLOAD_FAILS_BEFORE_CACHE = 2;
+        const MAX_CACHED_ASSETS = 3;
 
         // ── activate ──────────────────────────────────────
         async function activate(context) {
@@ -105,20 +153,50 @@ def _generate_extension_js() -> str:
             const found = await which('cgp');
             if (found) return found;
 
-            // 2. Check well-known location
-            const home = os.homedir();
-            const knownBin = process.platform === 'win32'
-                ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'cgp', 'cgp.exe')
-                : path.join(home, '.local', 'bin', 'cgp');
+            const paths = getInstallPaths();
+            if (fs.existsSync(paths.knownBin)) return paths.knownBin;
 
-            if (fs.existsSync(knownBin)) return knownBin;
+            const state = readDownloadState(paths);
+            let failures = toInt(state.consecutiveFailures, 0);
 
-            // 3. Download from GitHub
-            return await downloadLatest();
+            try {
+                const installed = await downloadLatest(paths);
+                if (installed) {
+                    writeDownloadState(paths, {
+                        consecutiveFailures: 0,
+                        lastSource: 'network',
+                        updatedAt: Date.now(),
+                    });
+                    return installed;
+                }
+            } catch (_) {
+                // Ignore network/download errors and continue to cache fallback path.
+            }
+
+            failures += 1;
+            writeDownloadState(paths, {
+                consecutiveFailures: failures,
+                lastSource: 'network_failed',
+                updatedAt: Date.now(),
+            });
+
+            if (failures >= DOWNLOAD_FAILS_BEFORE_CACHE) {
+                const cached = await installFromCache(paths);
+                if (cached) {
+                    writeDownloadState(paths, {
+                        consecutiveFailures: 0,
+                        lastSource: 'cache',
+                        updatedAt: Date.now(),
+                    });
+                    return cached;
+                }
+            }
+
+            return null;
         }
 
         // ── downloadLatest ────────────────────────────────
-        async function downloadLatest() {
+        async function downloadLatest(paths) {
             const apiUrl = `https://api.github.com/repos/${REPO}/releases/latest`;
             const releaseJson = await httpsGet(apiUrl);
             const release = JSON.parse(releaseJson.toString('utf8'));
@@ -130,84 +208,140 @@ def _generate_extension_js() -> str:
 
             const downloadUrl = `https://github.com/${REPO}/releases/download/${tag}/${assetName}`;
             const data = await httpsGet(downloadUrl);
+            fs.mkdirSync(paths.cacheDir, { recursive: true });
 
-            const home = os.homedir();
+            const cacheName = `${sanitizeTag(tag)}--${assetName}`;
+            const cachePath = path.join(paths.cacheDir, cacheName);
+            fs.writeFileSync(cachePath, data);
+            pruneCache(paths.cacheDir);
+
+            return await installFromArchive(cachePath, assetName, tag, paths);
+        }
+
+        async function installFromCache(paths) {
+            const expectedAsset = selectAsset(process.platform, process.arch);
+            if (!expectedAsset) return null;
+
+            let names = [];
+            try {
+                names = fs.readdirSync(paths.cacheDir);
+            } catch (_) {
+                return null;
+            }
+
+            const candidates = names
+                .map((name) => {
+                    const parsed = parseCachedName(name);
+                    if (!parsed) return null;
+                    if (parsed.assetName !== expectedAsset) return null;
+                    const full = path.join(paths.cacheDir, name);
+                    let stat = null;
+                    try { stat = fs.statSync(full); } catch (_) {}
+                    if (!stat || !stat.isFile()) return null;
+                    return {
+                        full,
+                        mtimeMs: toInt(stat.mtimeMs, 0),
+                        assetName: parsed.assetName,
+                        tag: parsed.tag,
+                    };
+                })
+                .filter(Boolean)
+                .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+            for (const item of candidates) {
+                try {
+                    const installed = await installFromArchive(item.full, item.assetName, item.tag, paths);
+                    if (installed) return installed;
+                } catch (_) {
+                    // Try next cached archive.
+                }
+            }
+            return null;
+        }
+
+        function parseCachedName(name) {
+            if (!(name.endsWith('.tar.gz') || name.endsWith('.zip'))) return null;
+            const idx = name.indexOf('--');
+            if (idx <= 0) return null;
+            const tag = name.slice(0, idx);
+            const assetName = name.slice(idx + 2);
+            if (!assetName) return null;
+            return { tag, assetName };
+        }
+
+        async function installFromArchive(archivePath, assetName, tag, paths) {
             const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgp-'));
 
             try {
-                const archivePath = path.join(tmpDir, assetName);
-                fs.writeFileSync(archivePath, data);
+                const localArchive = path.join(tmpDir, assetName);
+                fs.copyFileSync(archivePath, localArchive);
 
                 // Extract
                 if (assetName.endsWith('.tar.gz')) {
-                    await execPromise(`tar xzf "${archivePath}"`, { cwd: tmpDir });
+                    await execPromise(`tar xzf "${localArchive}"`, { cwd: tmpDir });
                 } else if (assetName.endsWith('.zip')) {
                     if (process.platform === 'win32') {
+                        const psArchive = localArchive.replace(/'/g, "''");
+                        const psTmpDir = tmpDir.replace(/'/g, "''");
                         await execPromise(
-                            `powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${tmpDir}' -Force"`,
+                            `powershell -NoProfile -Command "Expand-Archive -Path '${psArchive}' -DestinationPath '${psTmpDir}' -Force"`,
                             { cwd: tmpDir }
                         );
                     } else {
-                        await execPromise(`unzip -o "${archivePath}"`, { cwd: tmpDir });
+                        await execPromise(`unzip -o "${localArchive}"`, { cwd: tmpDir });
                     }
                 } else {
                     return null;
                 }
 
-                // Install to versioned directory
-                const installRoot = process.platform === 'win32'
-                    ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'cgp')
-                    : path.join(home, '.local', 'lib', 'cgp');
-                const binDir = process.platform === 'win32'
-                    ? installRoot
-                    : path.join(home, '.local', 'bin');
-                const versionsDir = path.join(installRoot, 'versions');
-                const versionDir = path.join(versionsDir, tag);
-
-                fs.mkdirSync(versionsDir, { recursive: true });
-                fs.mkdirSync(binDir, { recursive: true });
-
-                // Remove old version dir if exists
-                if (fs.existsSync(versionDir)) {
-                    fs.rmSync(versionDir, { recursive: true, force: true });
-                }
-
-                // Move extracted cgp/ folder to version dir
-                const extractedCgp = path.join(tmpDir, 'cgp');
-                fs.renameSync(extractedCgp, versionDir);
-
-                const exeName = process.platform === 'win32' ? 'cgp.exe' : 'cgp';
-                const exePath = path.join(versionDir, exeName);
-
-                // Make executable on Unix
-                if (process.platform !== 'win32') {
-                    try { fs.chmodSync(exePath, 0o755); } catch (_) {}
-                }
-
-                // Create current and bin links/copies.
-                const currentLink = path.join(installRoot, 'current');
-                const binLink = path.join(binDir, exeName);
-                if (process.platform === 'win32') {
-                    // Windows users often cannot create symlinks without admin/dev mode.
-                    // Use copy fallback so installation is still usable.
-                    try { fs.rmSync(currentLink, { recursive: true, force: true }); } catch (_) {}
-                    try { fs.cpSync(versionDir, currentLink, { recursive: true }); } catch (_) {}
-                    const currentExe = path.join(currentLink, exeName);
-                    try { fs.copyFileSync(currentExe, binLink); } catch (_) {}
-                    let binOk = false;
-                    try { binOk = fs.existsSync(binLink) && fs.statSync(binLink).isFile(); } catch (_) {}
-                    return binOk ? binLink : currentExe;
-                }
-
-                // Unix: prefer symlinks for fast upgrades.
-                try { fs.unlinkSync(currentLink); } catch (_) {}
-                try { fs.symlinkSync(versionDir, currentLink); } catch (_) {}
-                try { fs.unlinkSync(binLink); } catch (_) {}
-                try { fs.symlinkSync(exePath, binLink); } catch (_) {}
-                return binLink;
+                return installExtractedBundle(tmpDir, tag, paths);
             } finally {
                 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
             }
+        }
+
+        function installExtractedBundle(tmpDir, tag, paths) {
+            const versionTag = sanitizeTag(tag) || `cached-${Date.now()}`;
+            const versionDir = path.join(paths.versionsDir, versionTag);
+
+            fs.mkdirSync(paths.versionsDir, { recursive: true });
+            fs.mkdirSync(paths.binDir, { recursive: true });
+
+            if (fs.existsSync(versionDir)) {
+                fs.rmSync(versionDir, { recursive: true, force: true });
+            }
+
+            const extractedCgp = path.join(tmpDir, 'cgp');
+            if (!fs.existsSync(extractedCgp)) return null;
+            fs.renameSync(extractedCgp, versionDir);
+
+            const exePath = path.join(versionDir, paths.exeName);
+            let exeOk = false;
+            try { exeOk = fs.existsSync(exePath) && fs.statSync(exePath).isFile(); } catch (_) {}
+            if (!exeOk) return null;
+
+            if (process.platform !== 'win32') {
+                try { fs.chmodSync(exePath, 0o755); } catch (_) {}
+            }
+
+            if (process.platform === 'win32') {
+                // Windows users often cannot create symlinks without admin/dev mode.
+                // Use copy fallback so installation is still usable.
+                try { fs.rmSync(paths.currentLink, { recursive: true, force: true }); } catch (_) {}
+                try { fs.cpSync(versionDir, paths.currentLink, { recursive: true }); } catch (_) {}
+                const currentExe = path.join(paths.currentLink, paths.exeName);
+                try { fs.copyFileSync(currentExe, paths.knownBin); } catch (_) {}
+                let binOk = false;
+                try { binOk = fs.existsSync(paths.knownBin) && fs.statSync(paths.knownBin).isFile(); } catch (_) {}
+                return binOk ? paths.knownBin : currentExe;
+            }
+
+            // Unix: prefer symlinks for fast upgrades.
+            try { fs.unlinkSync(paths.currentLink); } catch (_) {}
+            try { fs.symlinkSync(versionDir, paths.currentLink); } catch (_) {}
+            try { fs.unlinkSync(paths.knownBin); } catch (_) {}
+            try { fs.symlinkSync(exePath, paths.knownBin); } catch (_) {}
+            return paths.knownBin;
         }
 
         // ── runPatch ──────────────────────────────────────
@@ -216,20 +350,141 @@ def _generate_extension_js() -> str:
                 execFile(cgpPath, ['patch'], { timeout: 60000 }, (err, stdout, stderr) => {
                     if (err) { resolve(); return; }
                     const output = (stdout || '').toString();
-                    const m = output.match(/Patched:\\s*(\\d+)/);
-                    if (m && parseInt(m[1], 10) > 0) {
-                        vscode.window.showInformationMessage(
-                            `CGP: Patched ${m[1]} file(s). Reload to apply.`,
-                            'Reload'
-                        ).then(choice => {
-                            if (choice === 'Reload') {
-                                vscode.commands.executeCommand('workbench.action.reloadWindow');
-                            }
-                        });
+                    const m = output.match(/Patched:\\s*(\\d+)/i);
+                    const patchedCount = m ? parseInt(m[1], 10) : 0;
+                    if (patchedCount > 0) {
+                        handleReloadAfterPatch(patchedCount).finally(() => resolve());
+                        return;
                     }
                     resolve();
                 });
             });
+        }
+
+        async function handleReloadAfterPatch(patchedCount) {
+            const cfg = getReloadConfig();
+            const hasDirty = hasDirtyEditors();
+
+            if (cfg.mode === 'auto' && !hasDirty) {
+                vscode.window.showInformationMessage(
+                    `CGP: Patched ${patchedCount} file(s). Reloading...`
+                );
+                setTimeout(() => {
+                    vscode.commands.executeCommand('workbench.action.reloadWindow');
+                }, cfg.delayMs);
+                return;
+            }
+
+            if (cfg.mode === 'off') {
+                vscode.window.showInformationMessage(
+                    `CGP: Patched ${patchedCount} file(s). Reload manually to apply.`
+                );
+                return;
+            }
+
+            // Prompt mode, or auto mode fallback when there are unsaved files.
+            const msg = hasDirty && cfg.mode === 'auto'
+                ? `CGP: Patched ${patchedCount} file(s). Unsaved files detected. Click Reload when ready.`
+                : `CGP: Patched ${patchedCount} file(s). Reload to apply.`;
+            const choice = await vscode.window.showInformationMessage(msg, 'Reload');
+            if (choice === 'Reload') {
+                await vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        }
+
+        function getReloadConfig() {
+            const config = vscode.workspace.getConfiguration('cgp.autoPatcher');
+            const rawMode = String(config.get('reloadMode', 'prompt') || '').toLowerCase();
+            const mode = ['prompt', 'auto', 'off'].includes(rawMode) ? rawMode : 'prompt';
+
+            const rawDelay = Number(config.get('reloadDelayMs', 1200));
+            const delayMs = Number.isFinite(rawDelay) && rawDelay >= 0
+                ? Math.floor(rawDelay)
+                : 1200;
+            return { mode, delayMs };
+        }
+
+        function hasDirtyEditors() {
+            try {
+                return vscode.workspace.textDocuments.some(doc => doc.isDirty);
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function getInstallPaths() {
+            const home = os.homedir();
+            const installRoot = process.platform === 'win32'
+                ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'cgp')
+                : path.join(home, '.local', 'lib', 'cgp');
+            const binDir = process.platform === 'win32'
+                ? installRoot
+                : path.join(home, '.local', 'bin');
+            const exeName = process.platform === 'win32' ? 'cgp.exe' : 'cgp';
+            const knownBin = process.platform === 'win32'
+                ? path.join(installRoot, exeName)
+                : path.join(binDir, exeName);
+            return {
+                installRoot,
+                binDir,
+                exeName,
+                knownBin,
+                versionsDir: path.join(installRoot, 'versions'),
+                currentLink: path.join(installRoot, 'current'),
+                cacheDir: path.join(installRoot, 'cache'),
+                stateFile: path.join(installRoot, 'download_state.json'),
+            };
+        }
+
+        function readDownloadState(paths) {
+            try {
+                const raw = fs.readFileSync(paths.stateFile, 'utf8');
+                const data = JSON.parse(raw);
+                if (data && typeof data === 'object') return data;
+            } catch (_) {}
+            return { consecutiveFailures: 0 };
+        }
+
+        function writeDownloadState(paths, state) {
+            try {
+                fs.mkdirSync(paths.installRoot, { recursive: true });
+                fs.writeFileSync(paths.stateFile, JSON.stringify(state));
+            } catch (_) {}
+        }
+
+        function pruneCache(cacheDir) {
+            let files = [];
+            try {
+                files = fs.readdirSync(cacheDir);
+            } catch (_) {
+                return;
+            }
+
+            const items = files
+                .map((name) => {
+                    const full = path.join(cacheDir, name);
+                    let stat = null;
+                    try { stat = fs.statSync(full); } catch (_) {}
+                    if (!stat || !stat.isFile()) return null;
+                    if (!(name.endsWith('.tar.gz') || name.endsWith('.zip'))) return null;
+                    return { full, mtimeMs: toInt(stat.mtimeMs, 0) };
+                })
+                .filter(Boolean)
+                .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+            for (let i = MAX_CACHED_ASSETS; i < items.length; i += 1) {
+                try { fs.unlinkSync(items[i].full); } catch (_) {}
+            }
+        }
+
+        function sanitizeTag(tag) {
+            return String(tag || '').replace(/[^a-zA-Z0-9._-]/g, '_');
+        }
+
+        function toInt(value, fallback) {
+            const n = Number(value);
+            if (Number.isFinite(n)) return Math.floor(n);
+            return fallback;
         }
 
         // ── helpers ───────────────────────────────────────
@@ -383,8 +638,12 @@ def install(
     target: str = "gui",
     *,
     extensions_root: Optional[Path] = None,
+    reload_mode: str = DEFAULT_RELOAD_MODE,
+    reload_delay_ms: int = DEFAULT_RELOAD_DELAY_MS,
 ) -> str:
     """Install the auto-patcher extension. Returns a status message."""
+    mode = _normalize_reload_mode(reload_mode)
+    delay_ms = _normalize_reload_delay_ms(reload_delay_ms)
     root = extensions_root or _extensions_root(target)
     version = __version__
 
@@ -399,7 +658,10 @@ def install(
     ext_dir.mkdir(parents=True, exist_ok=True)
 
     # Write package.json
-    (ext_dir / "package.json").write_text(_generate_package_json(version), encoding="utf-8")
+    (ext_dir / "package.json").write_text(
+        _generate_package_json(version, reload_mode=mode, reload_delay_ms=delay_ms),
+        encoding="utf-8",
+    )
 
     # Write extension.js
     (ext_dir / "extension.js").write_text(_generate_extension_js(), encoding="utf-8")
@@ -407,7 +669,10 @@ def install(
     # Register in extensions.json so Cursor discovers the extension
     _register_extension(root, version, ext_dir)
 
-    return f"Installed {EXTENSION_NAME} v{version} to {ext_dir}"
+    return (
+        f"Installed {EXTENSION_NAME} v{version} to {ext_dir} "
+        f"(reload_mode={mode}, reload_delay_ms={delay_ms})"
+    )
 
 
 def uninstall(

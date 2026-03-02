@@ -73,6 +73,10 @@ cgp unpatch        Restore original files from backups
 cgp status         Show installation and patch status
 cgp status --json  Output as JSON
 
+cgp auto install   Install auto-patcher extension
+cgp auto status    Show auto-patcher extension status
+cgp auto uninstall Remove auto-patcher extension
+
 cgp --version      Show version
 ```
 
@@ -82,6 +86,22 @@ cgp --version      Show version
 --server-dir DIR   Explicit Cursor server directory (skip auto-discovery)
 --gui-dir DIR      Explicit Cursor GUI directory (skip auto-discovery)
 ```
+
+### Auto-patcher reload behavior
+
+After a successful auto-patch, you can control whether Cursor reloads automatically:
+
+```bash
+cgp auto install --reload-mode prompt              # default, asks before reload
+cgp auto install --reload-mode auto                # auto reload after patch
+cgp auto install --reload-mode auto --reload-delay-ms 1500
+cgp auto install --reload-mode off                 # never reload automatically
+```
+
+- `prompt`: safest default for active coding sessions
+- `auto`: best for users who want zero-click recovery after Cursor updates
+- `off`: only patch and notify; reload manually later
+- If `cgp` is missing and network download fails repeatedly, the auto-patcher will fallback to local cached cgp bundles.
 
 ## Auto-update
 

@@ -52,6 +52,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target", choices=["gui", "server"], default="gui",
         help="Where to install (default: gui)",
     )
+    p_auto.add_argument(
+        "--reload-mode",
+        choices=["prompt", "auto", "off"],
+        default="prompt",
+        help="Post-patch reload behavior for auto extension (default: prompt)",
+    )
+    p_auto.add_argument(
+        "--reload-delay-ms",
+        type=int,
+        default=1200,
+        help="Delay before auto reload when reload-mode=auto (default: 1200)",
+    )
 
     return parser
 
@@ -142,7 +154,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         from .auto_extension import status as ext_status
 
         if args.action == "install":
-            print(ext_install(target=args.target))
+            print(
+                ext_install(
+                    target=args.target,
+                    reload_mode=args.reload_mode,
+                    reload_delay_ms=args.reload_delay_ms,
+                )
+            )
         elif args.action == "uninstall":
             print(ext_uninstall(target=args.target))
         elif args.action == "status":

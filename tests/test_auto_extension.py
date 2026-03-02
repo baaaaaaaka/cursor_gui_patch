@@ -47,6 +47,28 @@ class TestGeneratePackageJson:
         data = json.loads(_generate_package_json("0.1.0"))
         assert data["main"] == "./extension.js"
 
+    def test_reload_settings_defaults(self):
+        data = json.loads(_generate_package_json("0.1.0"))
+        props = data["contributes"]["configuration"]["properties"]
+        assert props["cgp.autoPatcher.reloadMode"]["default"] == "prompt"
+        assert props["cgp.autoPatcher.reloadDelayMs"]["default"] == 1200
+
+    def test_reload_settings_can_be_customized(self):
+        data = json.loads(
+            _generate_package_json("0.1.0", reload_mode="auto", reload_delay_ms=2500)
+        )
+        props = data["contributes"]["configuration"]["properties"]
+        assert props["cgp.autoPatcher.reloadMode"]["default"] == "auto"
+        assert props["cgp.autoPatcher.reloadDelayMs"]["default"] == 2500
+
+    def test_reload_mode_validation(self):
+        with pytest.raises(ValueError):
+            _generate_package_json("0.1.0", reload_mode="invalid")
+
+    def test_reload_delay_validation(self):
+        with pytest.raises(ValueError):
+            _generate_package_json("0.1.0", reload_delay_ms=-1)
+
 
 class TestGenerateExtensionJs:
     def test_contains_repo(self):
@@ -88,6 +110,20 @@ class TestGenerateExtensionJs:
         assert "fs.cpSync" in js
         assert "fs.copyFileSync" in js
         assert "fs.statSync" in js
+
+    def test_contains_reload_configuration_handling(self):
+        js = _generate_extension_js()
+        assert "getConfiguration('cgp.autoPatcher')" in js
+        assert "reloadMode" in js
+        assert "reloadDelayMs" in js
+        assert "hasDirtyEditors" in js
+
+    def test_contains_download_cache_fallback_logic(self):
+        js = _generate_extension_js()
+        assert "DOWNLOAD_FAILS_BEFORE_CACHE" in js
+        assert "installFromCache" in js
+        assert "download_state.json" in js
+        assert "cacheDir" in js
 
 
 class TestExtensionsRoot:
@@ -338,6 +374,22 @@ class TestInstall:
         result = install(extensions_root=tmp_path)
         assert str(tmp_path) in result
 
+    def test_install_custom_reload_defaults(self, tmp_path: Path):
+        install(extensions_root=tmp_path, reload_mode="auto", reload_delay_ms=333)
+        ext_dir = tmp_path / _ext_dir_name(__version__)
+        pkg = json.loads((ext_dir / "package.json").read_text(encoding="utf-8"))
+        props = pkg["contributes"]["configuration"]["properties"]
+        assert props["cgp.autoPatcher.reloadMode"]["default"] == "auto"
+        assert props["cgp.autoPatcher.reloadDelayMs"]["default"] == 333
+
+    def test_install_invalid_reload_mode(self, tmp_path: Path):
+        with pytest.raises(ValueError):
+            install(extensions_root=tmp_path, reload_mode="bad")
+
+    def test_install_invalid_reload_delay(self, tmp_path: Path):
+        with pytest.raises(ValueError):
+            install(extensions_root=tmp_path, reload_delay_ms=-10)
+
 
 class TestUninstall:
     def test_removes_extension(self, tmp_path: Path):
@@ -449,6 +501,23 @@ class TestCLIIntegration:
 
         ext_dir = tmp_path / _ext_dir_name(__version__)
         assert ext_dir.is_dir()
+
+    def test_install_via_cli_with_reload_options(self, tmp_path: Path):
+        from unittest import mock
+
+        with mock.patch(
+            "cursor_gui_patch.auto_extension._extensions_root",
+            return_value=tmp_path,
+        ):
+            from cursor_gui_patch.cli import main
+
+            main(["auto", "install", "--reload-mode", "auto", "--reload-delay-ms", "900"])
+
+        ext_dir = tmp_path / _ext_dir_name(__version__)
+        pkg = json.loads((ext_dir / "package.json").read_text(encoding="utf-8"))
+        props = pkg["contributes"]["configuration"]["properties"]
+        assert props["cgp.autoPatcher.reloadMode"]["default"] == "auto"
+        assert props["cgp.autoPatcher.reloadDelayMs"]["default"] == 900
 
     def test_status_via_cli(self, tmp_path: Path, capsys):
         from unittest import mock
