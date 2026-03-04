@@ -2,3 +2,4 @@
 # Format: cursor_version commit_hash date status
 2.5.25 7150844152b426ed50d2b68dd6b33b5c5beb73ca 2026-02-25 pass
 2.5.26 7d96c2a03bb088ad367615e9da1a3fe20fbbc6ae 2026-02-27 pass
+2.6.11 8c95649f251a168cc4bb34c89531fae7db4bd992 2026-03-04 pass
