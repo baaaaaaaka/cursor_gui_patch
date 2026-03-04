@@ -250,12 +250,31 @@ jobs:
             "${{ matrix.image }}" \
             bash -lc '
               set -euxo pipefail
-              if command -v apt-get >/dev/null 2>&1; then
-                apt-get update -qq
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tar coreutils >/dev/null 2>&1
-              elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y -q tar coreutils >/dev/null 2>&1
-              fi
+              # Prefer existing base-image tools to avoid network-related flakes in CI.
+              # Install only when a required command is actually missing.
+              ensure_cmd() {
+                if command -v "$1" >/dev/null 2>&1; then
+                  return 0
+                fi
+                if command -v apt-get >/dev/null 2>&1; then
+                  apt-get update -qq
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tar coreutils >/dev/null 2>&1
+                elif command -v dnf >/dev/null 2>&1; then
+                  dnf install -y -q tar coreutils >/dev/null 2>&1
+                else
+                  echo "Missing required command: $1 (no supported package manager found)" >&2
+                  exit 1
+                fi
+                command -v "$1" >/dev/null 2>&1 || {
+                  echo "Missing required command after install attempt: $1" >&2
+                  exit 1
+                }
+              }
+              ensure_cmd tar
+              ensure_cmd cp
+              ensure_cmd mv
+              ensure_cmd ln
+              ensure_cmd awk
 
               export CGP_INSTALL_FROM_DIR="/work/dist"
               export CGP_INSTALL_DEST="/work/tmp-ci/${{ matrix.distro }}/bin"
