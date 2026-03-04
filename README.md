@@ -138,6 +138,69 @@ cgp automatically re-signs Cursor.app after patching. If it fails:
 sudo codesign --force --deep --sign - /Applications/Cursor.app
 ```
 
+To reduce repeated Keychain prompts after patching, prefer a fixed signing identity
+instead of ad-hoc signing:
+
+```bash
+export CGP_CODESIGN_IDENTITY="CGP Cursor Patch"
+cgp patch
+```
+
+Notes:
+- macOS only; non-macOS platforms ignore this setting.
+- If the preferred identity fails, cgp falls back to ad-hoc signing (`-`) to avoid blocking patch.
+- You can also control auto-detection name with `CGP_CODESIGN_STABLE_IDENTITY_NAME`
+  (default: `CGP Cursor Patch`).
+
+### macOS official-signature restore (snapshot mode)
+
+On macOS GUI installs, cgp now keeps **one latest full-app snapshot** to restore
+official signature without reinstalling:
+
+- `cgp patch`: before patching, if current app signature is confidently official,
+  cgp refreshes a single snapshot copy (old snapshot is replaced).
+- `cgp unpatch`: cgp first tries full-app snapshot restore.
+  If successful, official signature is restored and re-sign is skipped.
+- If no usable snapshot exists, cgp falls back to file-level `.cgp.bak` restore
+  and then re-signs as before.
+
+Scope and storage:
+- macOS GUI only; server installs and non-macOS are unchanged.
+- Extra disk usage: about one additional `Cursor.app` size (single latest version).
+- Default snapshot directory: `~/.cursor_gui_patch/macos_official_app_snapshots`.
+
+Advanced env:
+- `CGP_DISABLE_MACOS_APP_SNAPSHOT=1`: disable snapshot mode.
+- `CGP_MACOS_APP_SNAPSHOT_DIR=/path/to/dir`: override snapshot storage location.
+- `CGP_MACOS_OFFICIAL_AUTHORITY_HINTS=Anysphere`: signature authority hints used
+  to decide whether app is "official enough" to refresh snapshot.
+
+================ macOS Keychain / Signature ================
+
+After patch/unpatch on macOS, you may see prompts like:
+`Cursor wants to use your confidential information stored in "Cursor Safe Storage"`.
+
+Why prompts happen:
+- Keychain permission is tied to code-sign identity.
+- Cursor auto-update restores official signature.
+- cgp patch/unpatch re-signs app bundle, so identity may switch.
+
+Best practice:
+- Use one fixed signing identity (`CGP_CODESIGN_IDENTITY`) for all runs.
+- Confirm requester path is `/Applications/Cursor.app`, then click `Always Allow`.
+- If prompts repeat, inspect `Cursor Safe Storage` rules in Keychain Access.
+
+Password prompts (typical):
+- Usually `0-2` prompts around update/patch cycles.
+- Each prompt may ask your macOS login password once.
+
+Official signature after `unpatch`:
+- If snapshot restore succeeds, official signature is restored from saved app snapshot.
+- If snapshot restore is unavailable, cgp uses file-level restore + re-sign (not vendor signature).
+- For older cgp versions (before snapshot mode) with no app snapshot, use official installer/update path.
+
+TLDR >>> macOS now prefers one-latest official app snapshot for unpatch restore; if trusted prompt path is `/Applications/Cursor.app`, click `Always Allow` (or equivalent) and keep a fixed signing identity to minimize fallback re-sign prompts.
+
 ### Patch doesn't work after Cursor update
 
 Cursor updates replace patched files. Re-run `cgp patch` after each update.
@@ -149,6 +212,19 @@ cgp unpatch
 ```
 
 This restores all original files from `.cgp.bak` backups created during patching.
+
+macOS one-click script can also auto-install official Cursor.app (optional):
+
+```bash
+CGP_UNPATCH_INSTALL_OFFICIAL_APP=auto \
+  curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_gui_patch/main/scripts/unpatch.sh | sh
+```
+
+- `CGP_UNPATCH_INSTALL_OFFICIAL_APP=auto`: only when unpatch restored nothing (`Restored: 0` and `No backup > 0`).
+- `CGP_UNPATCH_INSTALL_OFFICIAL_APP=always`: always reinstall official app after successful unpatch.
+- default on macOS (unset): `auto`.
+- `CGP_UNPATCH_INSTALL_OFFICIAL_APP=off`: disable this behavior.
+- Installer step tries without sudo first and only prompts for sudo if needed.
 
 ## Cursor compatibility
 

@@ -8,6 +8,8 @@ from unittest import mock
 
 from cursor_gui_patch.codesign import (
     _find_app_bundle,
+    _parse_security_identities,
+    _resolve_preferred_identity,
     codesign_app,
     needs_codesign,
     remove_quarantine,
@@ -53,10 +55,12 @@ class TestNeedsCodesign:
 class TestCodesignApp:
     def test_skips_on_non_macos(self, tmp_path: Path):
         app_root, _ = _make_app_root(tmp_path)
-        with mock.patch("cursor_gui_patch.codesign.sys.platform", "linux"):
+        with mock.patch("cursor_gui_patch.codesign.sys.platform", "linux"), \
+             mock.patch("cursor_gui_patch.codesign.subprocess.run") as run_mock:
             res = codesign_app(app_root)
         assert res.success is False
         assert res.skipped_reason == "not macOS"
+        run_mock.assert_not_called()
 
     def test_missing_codesign_binary(self, tmp_path: Path):
         app_root, _ = _make_app_root(tmp_path)
@@ -108,6 +112,60 @@ class TestCodesignApp:
         assert res.success is False
         assert "timed out" in res.error
 
+    def test_uses_explicit_identity_from_env(self, tmp_path: Path):
+        app_root, _ = _make_app_root(tmp_path)
+        proc = subprocess.CompletedProcess(args=["codesign"], returncode=0, stdout="", stderr="")
+        with mock.patch("cursor_gui_patch.codesign.sys.platform", "darwin"), \
+             mock.patch("cursor_gui_patch.codesign.shutil.which", return_value="/usr/bin/codesign"), \
+             mock.patch.dict("cursor_gui_patch.codesign.os.environ", {"CGP_CODESIGN_IDENTITY": "My Stable ID"}, clear=False), \
+             mock.patch("cursor_gui_patch.codesign.subprocess.run", return_value=proc) as run_mock:
+            res = codesign_app(app_root)
+        assert res.success is True
+        assert res.identity_used == "My Stable ID"
+        cmd = run_mock.call_args_list[0].args[0]
+        assert "--sign" in cmd
+        assert "My Stable ID" in cmd
+
+    def test_falls_back_to_adhoc_when_preferred_identity_fails(self, tmp_path: Path):
+        app_root, _ = _make_app_root(tmp_path)
+        fail_proc = subprocess.CompletedProcess(args=["codesign"], returncode=1, stdout="", stderr="bad id")
+        ok_proc = subprocess.CompletedProcess(args=["codesign"], returncode=0, stdout="", stderr="")
+        with mock.patch("cursor_gui_patch.codesign.sys.platform", "darwin"), \
+             mock.patch("cursor_gui_patch.codesign.shutil.which", side_effect=lambda n: f"/usr/bin/{n}"), \
+             mock.patch("cursor_gui_patch.codesign.subprocess.run", side_effect=[
+                 # security find-identity
+                 subprocess.CompletedProcess(
+                     args=["security"], returncode=0, stdout='  1) HASH "CGP Cursor Patch"\n', stderr=""
+                 ),
+                 # preferred identity fails
+                 fail_proc,
+                 # ad-hoc fallback succeeds
+                 ok_proc,
+             ]):
+            res = codesign_app(app_root)
+        assert res.success is True
+        assert res.identity_requested == "CGP Cursor Patch"
+        assert res.identity_used == "-"
+        assert "fell back to ad-hoc" in res.warning
+
+    def test_auto_uses_stable_identity_when_detected(self, tmp_path: Path):
+        app_root, _ = _make_app_root(tmp_path)
+        with mock.patch("cursor_gui_patch.codesign.sys.platform", "darwin"), \
+             mock.patch("cursor_gui_patch.codesign.shutil.which", side_effect=lambda n: f"/usr/bin/{n}"), \
+             mock.patch("cursor_gui_patch.codesign.subprocess.run", side_effect=[
+                 subprocess.CompletedProcess(
+                     args=["security"], returncode=0, stdout='  1) HASH "CGP Cursor Patch"\n', stderr=""
+                 ),
+                 subprocess.CompletedProcess(args=["codesign"], returncode=0, stdout="", stderr=""),
+             ]) as run_mock:
+            res = codesign_app(app_root)
+        assert res.success is True
+        assert res.identity_requested == "CGP Cursor Patch"
+        assert res.identity_used == "CGP Cursor Patch"
+        cmd = run_mock.call_args_list[1].args[0]
+        assert "--sign" in cmd
+        assert "CGP Cursor Patch" in cmd
+
 
 class TestRemoveQuarantine:
     def test_false_on_non_macos(self, tmp_path: Path):
@@ -132,5 +190,31 @@ class TestRemoveQuarantine:
         app_root, _ = _make_app_root(tmp_path)
         with mock.patch("cursor_gui_patch.codesign.sys.platform", "darwin"), \
              mock.patch("cursor_gui_patch.codesign.shutil.which", return_value="/usr/bin/xattr"), \
-             mock.patch("cursor_gui_patch.codesign.subprocess.run", side_effect=RuntimeError("xattr failed")):
+            mock.patch("cursor_gui_patch.codesign.subprocess.run", side_effect=RuntimeError("xattr failed")):
             assert remove_quarantine(app_root) is False
+
+
+class TestIdentityHelpers:
+    def test_parse_security_identities(self):
+        out = '  1) ABC "CGP Cursor Patch"\n  2) DEF "Apple Development: X"\n'
+        assert _parse_security_identities(out) == ["CGP Cursor Patch", "Apple Development: X"]
+
+    def test_resolve_prefers_env(self):
+        with mock.patch.dict("cursor_gui_patch.codesign.os.environ", {"CGP_CODESIGN_IDENTITY": "Pinned ID"}, clear=False):
+            ident, source = _resolve_preferred_identity()
+        assert ident == "Pinned ID"
+        assert source == "env:CGP_CODESIGN_IDENTITY"
+
+    def test_resolve_uses_stable_identity_name(self):
+        with mock.patch.dict(
+            "cursor_gui_patch.codesign.os.environ",
+            {"CGP_CODESIGN_STABLE_IDENTITY_NAME": "My Stable"},
+            clear=False,
+        ), \
+             mock.patch(
+                 "cursor_gui_patch.codesign._available_codesign_identities",
+                 return_value=["Apple Dev", "My Stable Identity"],
+             ):
+            ident, source = _resolve_preferred_identity()
+        assert ident == "My Stable Identity"
+        assert source == "auto:stable-identity"

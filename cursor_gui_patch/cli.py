@@ -8,6 +8,7 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from .macos_privacy import diagnose_macos_privacy_denial, open_privacy_settings_with_status
 from .patching import patch, unpatch, status
 
 
@@ -103,10 +104,26 @@ def main(argv: Optional[List[str]] = None) -> None:
             force=args.force,
             only_patches=only_patches,
         )
+        privacy_diag = diagnose_macos_privacy_denial(report.errors) if not report.ok else None
+        privacy_open_status = "not_certain"
+        if not args.dry_run and not report.ok:
+            privacy_open_status = open_privacy_settings_with_status(report.errors)
 
         if args.dry_run:
             print("[DRY RUN]")
         print(report.summary())
+        if privacy_diag and privacy_diag.likely:
+            print("")
+            print("Privacy action:")
+            if privacy_diag.certain:
+                if privacy_open_status == "opened":
+                    print("  Opened macOS Privacy & Security settings automatically.")
+                elif privacy_open_status == "disabled":
+                    print("  Auto-open is disabled by CGP_NO_OPEN_SETTINGS=1.")
+                else:
+                    print("  Could not open settings automatically. Open manually and grant permissions.")
+            else:
+                print("  Not auto-opening settings because confidence is not 100%.")
         if not report.ok:
             sys.exit(1)
 
@@ -116,10 +133,26 @@ def main(argv: Optional[List[str]] = None) -> None:
             gui_dir=gui_dir,
             dry_run=args.dry_run,
         )
+        privacy_diag = diagnose_macos_privacy_denial(report.errors) if not report.ok else None
+        privacy_open_status = "not_certain"
+        if not args.dry_run and not report.ok:
+            privacy_open_status = open_privacy_settings_with_status(report.errors)
 
         if args.dry_run:
             print("[DRY RUN]")
         print(report.summary())
+        if privacy_diag and privacy_diag.likely:
+            print("")
+            print("Privacy action:")
+            if privacy_diag.certain:
+                if privacy_open_status == "opened":
+                    print("  Opened macOS Privacy & Security settings automatically.")
+                elif privacy_open_status == "disabled":
+                    print("  Auto-open is disabled by CGP_NO_OPEN_SETTINGS=1.")
+                else:
+                    print("  Could not open settings automatically. Open manually and grant permissions.")
+            else:
+                print("  Not auto-opening settings because confidence is not 100%.")
         if not report.ok:
             sys.exit(1)
 

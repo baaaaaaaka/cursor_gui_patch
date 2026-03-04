@@ -3,6 +3,24 @@ name: tests
 on: [push, pull_request]
 
 jobs:
+  shell-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify shell script modes and syntax
+        run: |
+          set -euxo pipefail
+          files="$(git ls-files '*.sh')"
+          test -n "${files}"
+          git ls-files --stage '*.sh' | awk '
+            $1 != "100755" { print "Non-executable script in git index:", $4, "mode=" $1; bad=1 }
+            END { exit bad }
+          '
+          for f in ${files}; do
+            sh -n "${f}"
+          done
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -71,3 +89,153 @@ jobs:
               "$PY" -m pytest tests/ -q
               "$PY" -m cursor_gui_patch --version
             '
+
+  macos-codesign-real:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test dependencies
+        run: pip install -e . pytest
+
+      - name: Run real macOS codesign integration tests
+        run: python -m pytest tests/test_codesign_integration.py -v
+
+  macos-privacy-real:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test dependencies
+        run: pip install -e . pytest
+
+      - name: Prepare real /Applications privacy-denial fixture
+        run: |
+          set -euxo pipefail
+          APP_BUNDLE="/Applications/CGPPrivacyTest.app"
+          APP_ROOT="${APP_BUNDLE}/Contents/Resources/app"
+          DIST_DIR="${APP_ROOT}/extensions/cursor-agent-exec/dist"
+
+          sudo rm -rf "${APP_BUNDLE}"
+          sudo mkdir -p "${DIST_DIR}"
+
+          cat > /tmp/cgp_product.json <<'JSON'
+          {"applicationName":"cursor","serverDataFolderName":".cursor-server","checksums":{}}
+          JSON
+
+          cat > /tmp/cgp_main.js <<'JS'
+          prefix;async getTeamAdminSettings(){return(Date.now()-this.lastFetchTime>ra||void 0===await this.settingsPromise)&&(this.settingsPromise=this.fetchSettings()),this.settingsPromise};async getAutoRunControls(){const e=await this.getTeamAdminSettings();if(e?.autoRunControls?.enabled)return{enabled:e.autoRunControls.enabled}};suffix
+          JS
+
+          sudo cp /tmp/cgp_product.json "${APP_ROOT}/product.json"
+          sudo cp /tmp/cgp_main.js "${DIST_DIR}/main.js"
+          sudo chown -R "${USER}:$(id -gn)" "${APP_BUNDLE}"
+
+          # Real EPERM trigger on backup creation inside dist/: immutable directory.
+          sudo chflags uchg "${DIST_DIR}"
+
+      - name: Run real macOS privacy integration tests
+        env:
+          CGP_REAL_MACOS_PRIVACY_TEST: "1"
+          CGP_REAL_MACOS_PRIVACY_TEST_ROOT: "/Applications/CGPPrivacyTest.app/Contents/Resources/app"
+          CGP_NO_OPEN_SETTINGS: "1"
+        run: python -m pytest tests/test_macos_privacy_integration.py -v
+
+      - name: Cleanup real /Applications fixture
+        if: always()
+        run: |
+          set -euxo pipefail
+          APP_BUNDLE="/Applications/CGPPrivacyTest.app"
+          sudo chflags -R nouchg "${APP_BUNDLE}" || true
+          sudo rm -rf "${APP_BUNDLE}" || true
+
+  macos-snapshot-real:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test dependencies
+        run: pip install -e . pytest
+
+      - name: Prepare real /Applications snapshot fixture
+        run: |
+          set -euxo pipefail
+          APP_BUNDLE="/Applications/CGPSnapshotTest.app"
+          APP_ROOT="${APP_BUNDLE}/Contents/Resources/app"
+          CONTENTS_DIR="${APP_BUNDLE}/Contents"
+
+          sudo rm -rf "${APP_BUNDLE}"
+          sudo mkdir -p "${APP_ROOT}" "${CONTENTS_DIR}"
+
+          cat > /tmp/cgp_snapshot_info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleIdentifier</key><string>dev.cgp.snapshot.test</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundleVersion</key><string>100</string>
+          </dict></plist>
+          PLIST
+
+          cat > /tmp/cgp_snapshot_product.json <<'JSON'
+          {"applicationName":"cursor","serverDataFolderName":".cursor-server","checksums":{}}
+          JSON
+
+          echo "original-marker" > /tmp/cgp_snapshot_marker.txt
+
+          sudo cp /tmp/cgp_snapshot_info.plist "${CONTENTS_DIR}/Info.plist"
+          sudo cp /tmp/cgp_snapshot_product.json "${APP_ROOT}/product.json"
+          sudo cp /tmp/cgp_snapshot_marker.txt "${APP_ROOT}/snapshot-marker.txt"
+          sudo chown -R "${USER}:$(id -gn)" "${APP_BUNDLE}"
+
+      - name: Run real macOS snapshot integration tests
+        env:
+          CGP_REAL_MACOS_SNAPSHOT_TEST: "1"
+          CGP_REAL_MACOS_SNAPSHOT_TEST_ROOT: "/Applications/CGPSnapshotTest.app/Contents/Resources/app"
+        run: python -m pytest tests/test_macos_app_snapshot_integration.py -v
+
+      - name: Cleanup real /Applications snapshot fixture
+        if: always()
+        run: |
+          set -euxo pipefail
+          APP_BUNDLE="/Applications/CGPSnapshotTest.app"
+          sudo rm -rf "${APP_BUNDLE}" || true
+
+  macos-unpatch-script-smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unpatch.sh smoke test with fake cgp
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/cgp-fake-bin
+          cat > /tmp/cgp-fake-bin/cgp <<'SH'
+          #!/usr/bin/env sh
+          set -eu
+          if [ "${1:-}" = "unpatch" ]; then
+            printf '%s\n' "Restored: 1"
+            printf '%s\n' "No backup: 0"
+            exit 0
+          fi
+          if [ "${1:-}" = "auto" ] && [ "${2:-}" = "uninstall" ]; then
+            exit 0
+          fi
+          exit 1
+          SH
+          chmod +x /tmp/cgp-fake-bin/cgp
+          PATH="/tmp/cgp-fake-bin:${PATH}" \
+            CGP_UNPATCH_INSTALL_OFFICIAL_APP=off \
+            sh scripts/unpatch.sh

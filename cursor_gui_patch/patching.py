@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -13,6 +14,7 @@ from . import backup as bak
 from . import cache as ca
 from .codesign import codesign_app, needs_codesign
 from .discovery import CursorInstallation, TargetFile, discover_all
+from .macos_app_snapshot import restore_official_app_snapshot, update_official_app_snapshot
 from .patches import get_patch
 from .patches.base import BasePatch
 from .report import CodesignInfo, FileStatus, PatchReport, StatusReport, UnpatchReport
@@ -44,6 +46,12 @@ def patch(
     report = PatchReport()
 
     for inst in installations:
+        if not dry_run and _is_macos_gui_installation(inst):
+            if _installation_has_pending_writes(inst, only_patches=only_patches):
+                snap = update_official_app_snapshot(inst.root)
+                if snap.message:
+                    report.notes.append(f"[{inst.kind}] {snap.message}")
+
         patched_before = len(report.patched)
         _patch_installation(
             inst, report,
@@ -59,6 +67,8 @@ def patch(
                     app_path=str(cs.app_path) if cs.app_path else str(inst.root),
                     success=cs.success,
                     error=cs.error,
+                    identity=cs.identity_used,
+                    warning=cs.warning,
                 ))
 
     return report
@@ -136,6 +146,54 @@ def _patch_installation(
 _EXT_HOST_RELPATH = Path("out/vs/workbench/api/node/extensionHostProcess.js")
 
 
+def _is_macos_gui_installation(inst: CursorInstallation) -> bool:
+    return sys.platform == "darwin" and inst.kind == "gui"
+
+
+def _installation_has_pending_writes(
+    inst: CursorInstallation,
+    *,
+    only_patches: Optional[Set[str]],
+) -> bool:
+    """
+    Preflight check: would this installation write at least one target file?
+
+    Used by macOS official-app snapshot logic to avoid replacing snapshot when
+    current files are already patched and no writes would occur.
+    """
+    for target in inst.target_files():
+        patch_names = target.patch_names
+        if only_patches:
+            patch_names = [n for n in patch_names if n in only_patches]
+        if not patch_names:
+            continue
+
+        try:
+            content = target.path.read_bytes().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        new_content = content
+        for patch_name in patch_names:
+            try:
+                p = get_patch(patch_name)
+            except Exception:
+                continue
+            new_content, result = p.apply(new_content)
+            if result.applied:
+                return True
+    return False
+
+
+def _invalidate_cache_for_installation(root: Path) -> None:
+    try:
+        cache_file = ca.cache_path(root)
+        if cache_file.exists():
+            cache_file.unlink()
+    except Exception:
+        pass
+
+
 def _rollback_installation_changes(
     inst: CursorInstallation,
     report: PatchReport,
@@ -164,12 +222,7 @@ def _rollback_installation_changes(
     del report.patched[patched_from:]
 
     # Cache may contain stale "patched" states; drop it.
-    try:
-        cache_file = ca.cache_path(inst.root)
-        if cache_file.exists():
-            cache_file.unlink()
-    except Exception:
-        pass
+    _invalidate_cache_for_installation(inst.root)
 
 
 def _update_extension_host_hashes(
@@ -199,8 +252,9 @@ def _update_extension_host_hashes(
         # No hashes were found/replaced — nothing to do
         return False
 
-    if bak.create_backup(ext_host) is None:
-        report.errors.append((ext_host, "backup failed"))
+    _, backup_err = bak.create_backup_with_error(ext_host)
+    if backup_err is not None:
+        report.errors.append((ext_host, f"backup failed: {backup_err}"))
         return False
 
     try:
@@ -262,8 +316,9 @@ def _update_product_json_checksums(
     if not updated:
         return
 
-    if bak.create_backup(product_json) is None:
-        report.errors.append((product_json, "backup failed"))
+    _, backup_err = bak.create_backup_with_error(product_json)
+    if backup_err is not None:
+        report.errors.append((product_json, f"backup failed: {backup_err}"))
         return
 
     try:
@@ -376,8 +431,9 @@ def _patch_target(
     old_hash = hashlib.sha256(original_bytes).hexdigest()
 
     # Create backup (idempotent)
-    if bak.create_backup(path) is None:
-        report.errors.append((path, "backup failed"))
+    _, backup_err = bak.create_backup_with_error(path)
+    if backup_err is not None:
+        report.errors.append((path, f"backup failed: {backup_err}"))
         return None
 
     # Write patched content
@@ -429,8 +485,22 @@ def unpatch(
     report = UnpatchReport()
 
     for inst in installations:
-        restored_before = len(report.restored)
         targets = inst.target_files()
+        restored_before = len(report.restored)
+
+        if not dry_run and _is_macos_gui_installation(inst):
+            snap = restore_official_app_snapshot(inst.root)
+            if snap.message:
+                report.notes.append(f"[{inst.kind}] {snap.message}")
+            if snap.action == "restored":
+                for target in targets:
+                    report.restored.append(target.path)
+                for aux_path in (inst.root / _EXT_HOST_RELPATH, inst.root / "product.json"):
+                    if aux_path.is_file():
+                        report.restored.append(aux_path)
+                _invalidate_cache_for_installation(inst.root)
+                continue
+
         for target in targets:
             path = target.path
             if not bak.has_backup(path):
@@ -446,13 +516,7 @@ def unpatch(
                     report.restored.append(path)
                     # Remove the backup after successful restore
                     bak.remove_backup(path)
-                    # Invalidate cache
-                    try:
-                        cache_file = ca.cache_path(inst.root)
-                        if cache_file.exists():
-                            cache_file.unlink()
-                    except Exception:
-                        pass
+                    _invalidate_cache_for_installation(inst.root)
                 else:
                     report.errors.append((path, "restore failed"))
             except Exception as e:
@@ -482,6 +546,8 @@ def unpatch(
                     app_path=str(cs.app_path) if cs.app_path else str(inst.root),
                     success=cs.success,
                     error=cs.error,
+                    identity=cs.identity_used,
+                    warning=cs.warning,
                 ))
 
     return report

@@ -36,6 +36,24 @@ fetch_to() {
   exit 3
 }
 
+print_macos_keychain_note() {
+  if [ "$(uname -s 2>/dev/null || true)" != "Darwin" ]; then
+    return 0
+  fi
+  printf '%s\n' ""
+  printf '%s\n' "================ macOS Keychain / Signature ================="
+  printf '%s\n' "Why prompts may appear:"
+  printf '%s\n' "  Keychain permission is tied to code-sign identity."
+  printf '%s\n' "Best practice:"
+  printf '%s\n' "  1) Use a fixed identity: export CGP_CODESIGN_IDENTITY=\"CGP Cursor Patch\""
+  printf '%s\n' "  2) Verify app path is /Applications/Cursor.app, then click Always Allow."
+  printf '%s\n' "  3) If repeated, review \"Cursor Safe Storage\" access in Keychain Access."
+  printf '%s\n' "Password prompts (typical):"
+  printf '%s\n' "  Usually 0-2 prompts around update/patch cycles."
+  printf '%s\n' "  Each prompt may ask macOS login password once."
+  printf '%s\n' "TLDR >>> prompts after update+patch are expected; if trusted prompt path is /Applications/Cursor.app, click Always Allow (or equivalent) once and keep one fixed identity."
+}
+
 # --- Priority 1: cgp already on PATH ---
 
 if command -v cgp >/dev/null 2>&1; then
@@ -50,6 +68,7 @@ if command -v cgp >/dev/null 2>&1; then
     printf '%s\n' ""
     printf '%s\n' "To undo, run:"
     printf '%s\n' "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/unpatch.sh | sh"
+    print_macos_keychain_note
   else
     printf '%s\n' ""
     printf '%s\n' "Patch failed (exit code ${EXIT_CODE:-0})."
@@ -92,6 +111,7 @@ if [ -n "${PYTHON}" ]; then
     printf '%s\n' ""
     printf '%s\n' "To undo, run:"
     printf '%s\n' "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/unpatch.sh | sh"
+    print_macos_keychain_note
   else
     printf '%s\n' ""
     printf '%s\n' "Patch failed (exit code ${EXIT_CODE:-0})."
@@ -162,6 +182,7 @@ if [ "${EXIT_CODE:-0}" = "0" ]; then
   printf '%s\n' ""
   printf '%s\n' "To undo, run:"
   printf '%s\n' "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/unpatch.sh | sh"
+  print_macos_keychain_note
 else
   printf '%s\n' ""
   printf '%s\n' "Patch failed (exit code ${EXIT_CODE:-0})."

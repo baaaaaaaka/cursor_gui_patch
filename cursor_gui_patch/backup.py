@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 _BACKUP_SUFFIX = ".cgp.bak"
 
@@ -20,9 +20,21 @@ def create_backup(original: Path) -> Optional[Path]:
 
     Returns the backup path if created or already exists, None on failure.
     """
+    bak, _ = create_backup_with_error(original)
+    return bak
+
+
+def create_backup_with_error(original: Path) -> Tuple[Optional[Path], Optional[Exception]]:
+    """
+    Create a backup and return both result and underlying error if any.
+
+    Returns:
+      (backup_path, None) on success or already exists.
+      (None, exception) on failure.
+    """
     bak = backup_path(original)
     if bak.exists():
-        return bak
+        return bak, None
     try:
         content = original.read_bytes()
         bak.write_bytes(content)
@@ -32,9 +44,9 @@ def create_backup(original: Path) -> Optional[Path]:
             os.chmod(bak, st.st_mode)
         except Exception:
             pass
-        return bak
-    except Exception:
-        return None
+        return bak, None
+    except Exception as e:
+        return None, e
 
 
 def restore_backup(original: Path) -> bool:

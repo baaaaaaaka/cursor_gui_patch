@@ -13,6 +13,7 @@ from unittest import mock
 import base64
 
 from cursor_gui_patch.discovery import CursorInstallation, EXTENSION_TARGETS, WORKBENCH_TARGETS
+from cursor_gui_patch.macos_app_snapshot import MacOSAppSnapshotResult
 from cursor_gui_patch.patching import patch, unpatch, status, _EXT_HOST_RELPATH
 from cursor_gui_patch.backup import has_backup
 
@@ -128,7 +129,10 @@ class TestPatch(unittest.TestCase):
             inst = _make_test_installation(root)
             before = {t.path: t.path.read_text() for t in inst.target_files()}
 
-            with mock.patch("cursor_gui_patch.patching.bak.create_backup", return_value=None):
+            with mock.patch(
+                "cursor_gui_patch.patching.bak.create_backup_with_error",
+                return_value=(None, OSError("[Errno 1] Operation not permitted")),
+            ):
                 report = patch(installations=[inst], force=True)
 
             self.assertFalse(report.ok)
@@ -166,6 +170,138 @@ class TestUnpatch(unittest.TestCase):
             inst = _make_test_installation(Path(d))
             report = unpatch(installations=[inst])
             self.assertGreater(len(report.no_backup), 0)
+
+    def test_unpatch_falls_back_to_file_restore_when_snapshot_not_restored(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+            originals = {t.path: t.path.read_text() for t in gui_inst.target_files()}
+
+            patch(installations=[gui_inst])
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "darwin"), \
+                 mock.patch(
+                     "cursor_gui_patch.patching.restore_official_app_snapshot",
+                     return_value=MacOSAppSnapshotResult(
+                         enabled=True,
+                         action="error",
+                         message="macOS official app snapshot restore failed: simulated",
+                     ),
+                 ) as restore_mock:
+                report = unpatch(installations=[gui_inst])
+
+            restore_mock.assert_called_once_with(gui_inst.root)
+            self.assertTrue(report.ok)
+            self.assertGreater(len(report.restored), 0)
+            self.assertTrue(any("snapshot restore failed" in n for n in report.notes))
+            for p, original in originals.items():
+                self.assertEqual(p.read_text(), original)
+
+    def test_unpatch_prefers_macos_official_snapshot_restore(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "darwin"), \
+                 mock.patch(
+                     "cursor_gui_patch.patching.restore_official_app_snapshot",
+                     return_value=MacOSAppSnapshotResult(
+                         enabled=True,
+                         action="restored",
+                         message="macOS official app snapshot restored (version: 1.2.3).",
+                     ),
+                 ) as restore_mock, \
+                 mock.patch("cursor_gui_patch.patching.bak.restore_backup") as restore_backup_mock, \
+                 mock.patch("cursor_gui_patch.patching.codesign_app") as codesign_mock:
+                report = unpatch(installations=[gui_inst])
+
+            restore_mock.assert_called_once_with(gui_inst.root)
+            restore_backup_mock.assert_not_called()
+            codesign_mock.assert_not_called()
+            self.assertTrue(any("snapshot restored" in n for n in report.notes))
+            self.assertGreater(len(report.restored), 0)
+
+
+class TestMacOSOfficialSnapshotPatchFlow(unittest.TestCase):
+    def test_patch_updates_snapshot_for_macos_gui_when_writes_pending(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "darwin"), \
+                 mock.patch(
+                     "cursor_gui_patch.patching.update_official_app_snapshot",
+                     return_value=MacOSAppSnapshotResult(
+                         enabled=True,
+                         action="updated",
+                         message="macOS official app snapshot updated.",
+                     ),
+                 ) as snap_mock:
+                report = patch(installations=[gui_inst], force=True)
+
+            snap_mock.assert_called_once_with(gui_inst.root)
+            self.assertTrue(any("snapshot updated" in n for n in report.notes))
+
+    def test_patch_does_not_update_snapshot_when_no_writes_pending(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+            patch(installations=[gui_inst], force=True)
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "darwin"), \
+                 mock.patch("cursor_gui_patch.patching.update_official_app_snapshot") as snap_mock:
+                report = patch(installations=[gui_inst], force=True)
+
+            snap_mock.assert_not_called()
+            self.assertEqual(len(report.patched), 0)
+
+    def test_patch_does_not_update_snapshot_on_non_macos(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "linux"), \
+                 mock.patch("cursor_gui_patch.patching.update_official_app_snapshot") as snap_mock:
+                patch(installations=[gui_inst], force=True)
+
+            snap_mock.assert_not_called()
+
+    def test_unpatch_does_not_try_snapshot_restore_on_non_macos(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "linux"), \
+                 mock.patch("cursor_gui_patch.patching.restore_official_app_snapshot") as restore_mock:
+                unpatch(installations=[gui_inst], dry_run=True)
+
+            restore_mock.assert_not_called()
+
+    def test_unpatch_non_macos_restores_files_without_snapshot_flow(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inst = _make_test_installation(root)
+            gui_inst = CursorInstallation(kind="gui", root=inst.root, version_id=inst.version_id)
+            originals = {t.path: t.path.read_text() for t in gui_inst.target_files()}
+
+            patch(installations=[gui_inst], force=True)
+
+            with mock.patch("cursor_gui_patch.patching.sys.platform", "linux"), \
+                 mock.patch("cursor_gui_patch.patching.restore_official_app_snapshot") as restore_mock:
+                report = unpatch(installations=[gui_inst], dry_run=False)
+
+            restore_mock.assert_not_called()
+            self.assertTrue(report.ok)
+            self.assertEqual(len(report.notes), 0)
+            self.assertGreater(len(report.restored), 0)
+            for p, original in originals.items():
+                self.assertEqual(p.read_text(), original)
 
 
 class TestStatus(unittest.TestCase):
@@ -308,14 +444,17 @@ class TestExtensionHostHashes(unittest.TestCase):
             originals = {t.path: t.path.read_text() for t in inst.target_files()}
 
             from cursor_gui_patch import patching as patching_module
-            real_create_backup = patching_module.bak.create_backup
+            real_create_backup = patching_module.bak.create_backup_with_error
 
             def fake_create_backup(path: Path):
                 if path == ext_host:
-                    return None
+                    return (None, OSError("[Errno 1] Operation not permitted"))
                 return real_create_backup(path)
 
-            with mock.patch("cursor_gui_patch.patching.bak.create_backup", side_effect=fake_create_backup):
+            with mock.patch(
+                "cursor_gui_patch.patching.bak.create_backup_with_error",
+                side_effect=fake_create_backup,
+            ):
                 report = patch(installations=[inst], force=True)
 
             self.assertFalse(report.ok)
@@ -544,14 +683,17 @@ class TestProductJsonChecksums(unittest.TestCase):
             originals = {t.path: t.path.read_text() for t in inst.target_files()}
 
             from cursor_gui_patch import patching as patching_module
-            real_create_backup = patching_module.bak.create_backup
+            real_create_backup = patching_module.bak.create_backup_with_error
 
             def fake_create_backup(path: Path):
                 if path == product_json:
-                    return None
+                    return (None, OSError("[Errno 1] Operation not permitted"))
                 return real_create_backup(path)
 
-            with mock.patch("cursor_gui_patch.patching.bak.create_backup", side_effect=fake_create_backup):
+            with mock.patch(
+                "cursor_gui_patch.patching.bak.create_backup_with_error",
+                side_effect=fake_create_backup,
+            ):
                 report = patch(installations=[inst], force=True)
 
             self.assertFalse(report.ok)
