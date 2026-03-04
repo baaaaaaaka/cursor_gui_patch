@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from cursor_gui_patch.macos_privacy import ProcessContext
 from cursor_gui_patch.report import CodesignInfo, PatchReport, StatusReport, UnpatchReport
+
+
+def _app_js() -> PurePosixPath:
+    return PurePosixPath(
+        "/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"
+    )
+
+
+def _app_ext_js() -> PurePosixPath:
+    return PurePosixPath(
+        "/Applications/Cursor.app/Contents/Resources/app/extensions/cursor-agent-exec/dist/main.js"
+    )
 
 
 class TestPatchReportSummary:
@@ -45,7 +57,8 @@ class TestPatchReportSummary:
                 warning="preferred identity failed; fell back to ad-hoc signature",
             )]
         )
-        s = report.summary()
+        with mock.patch("cursor_gui_patch.report.sys.platform", "darwin"):
+            s = report.summary()
         assert "identity: -" in s
         assert "Codesign TIP: set CGP_CODESIGN_IDENTITY" in s
         assert "Codesign NOTE:" in s
@@ -111,7 +124,7 @@ class TestPatchReportSummary:
     def test_includes_macos_privacy_hint_for_backup_failures(self):
         report = PatchReport(
             errors=[(
-                Path("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
+                _app_js(),
                 "backup failed: [Errno 1] Operation not permitted",
             )]
         )
@@ -152,7 +165,7 @@ class TestUnpatchReportSummary:
     def test_includes_macos_no_snapshot_no_backup_hint(self):
         report = UnpatchReport(
             restored=[],
-            no_backup=[Path("/Applications/Cursor.app/Contents/Resources/app/extensions/cursor-agent-exec/dist/main.js")],
+            no_backup=[_app_ext_js()],
             errors=[],
         )
         with mock.patch("cursor_gui_patch.report.sys.platform", "darwin"):
@@ -174,7 +187,7 @@ class TestUnpatchReportSummary:
     def test_macos_restore_hint_not_shown_on_windows(self):
         report = UnpatchReport(
             restored=[],
-            no_backup=[Path("/Applications/Cursor.app/Contents/Resources/app/extensions/cursor-agent-exec/dist/main.js")],
+            no_backup=[_app_ext_js()],
             errors=[],
         )
         with mock.patch("cursor_gui_patch.report.sys.platform", "win32"):
@@ -190,7 +203,7 @@ class TestUnpatchReportSummary:
     def test_includes_macos_privacy_hint_for_operation_not_permitted(self):
         report = UnpatchReport(
             errors=[(
-                Path("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
+                _app_js(),
                 "operation not permitted: [Errno 1] Operation not permitted",
             )]
         )

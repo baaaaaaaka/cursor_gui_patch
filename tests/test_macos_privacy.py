@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import PurePosixPath
 from unittest import mock
 
 from cursor_gui_patch.macos_privacy import (
@@ -17,7 +17,7 @@ from cursor_gui_patch.macos_privacy import (
 
 def _errors(msg: str):
     return [(
-        Path("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
+        PurePosixPath("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
         msg,
     )]
 
@@ -46,7 +46,7 @@ class TestMacOSPrivacyDetection:
             assert is_certain_macos_privacy_denial(_errors("[Errno 13] Permission denied")) is False
 
     def test_certain_denial_requires_app_bundle_path(self):
-        errors = [(Path("/tmp/x.js"), "[Errno 1] Operation not permitted")]
+        errors = [(PurePosixPath("/tmp/x.js"), "[Errno 1] Operation not permitted")]
         with mock.patch("cursor_gui_patch.macos_privacy.sys.platform", "darwin"):
             assert is_certain_macos_privacy_denial(errors) is False
 

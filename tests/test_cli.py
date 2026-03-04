@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 import pytest
@@ -13,6 +13,12 @@ from cursor_gui_patch.report import FileStatus, PatchReport, StatusReport, Unpat
 
 
 class TestCli:
+    @staticmethod
+    def _app_js() -> PurePosixPath:
+        return PurePosixPath(
+            "/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"
+        )
+
     def test_no_command_exits_with_help(self, capsys):
         with pytest.raises(SystemExit) as ex:
             main([])
@@ -32,7 +38,7 @@ class TestCli:
     def test_patch_attempts_open_settings_on_error(self):
         report = PatchReport()
         report.errors.append((
-            Path("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
+            self._app_js(),
             "backup failed: [Errno 1] Operation not permitted",
         ))
         with mock.patch("cursor_gui_patch.cli.patch", return_value=report), \
@@ -44,7 +50,7 @@ class TestCli:
     def test_patch_prints_privacy_action_when_likely(self, capsys):
         report = PatchReport()
         report.errors.append((
-            Path("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
+            self._app_js(),
             "backup failed: [Errno 1] Operation not permitted",
         ))
         with mock.patch("cursor_gui_patch.cli.patch", return_value=report), \
@@ -59,7 +65,7 @@ class TestCli:
     def test_patch_does_not_print_privacy_action_on_non_macos(self, capsys):
         report = PatchReport()
         report.errors.append((
-            Path("/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"),
+            self._app_js(),
             "backup failed: [Errno 1] Operation not permitted",
         ))
         with mock.patch("cursor_gui_patch.cli.patch", return_value=report), \
