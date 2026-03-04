@@ -19,7 +19,7 @@ def test_all_tracked_shell_scripts_are_executable_in_worktree():
 
     repo = Path(__file__).resolve().parents[1]
     proc = subprocess.run(
-        ["git", "-c", f"safe.directory={repo}", "ls-files", "*.sh"],
+        ["git", "-c", "safe.directory=*", "ls-files", "*.sh"],
         cwd=repo,
         capture_output=True,
         text=True,
