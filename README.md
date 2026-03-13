@@ -87,20 +87,20 @@ cgp --version      Show version
 --gui-dir DIR      Explicit Cursor GUI directory (skip auto-discovery)
 ```
 
-### Auto-patcher reload behavior
+### Auto-patcher relaunch behavior
 
-After a successful auto-patch, you can control whether Cursor reloads automatically:
+After a successful auto-patch, you can control whether Cursor relaunches automatically:
 
 ```bash
-cgp auto install --reload-mode prompt              # default, asks before reload
-cgp auto install --reload-mode auto                # auto reload after patch
+cgp auto install --reload-mode prompt              # default, asks before relaunch
+cgp auto install --reload-mode auto                # auto relaunch after patch
 cgp auto install --reload-mode auto --reload-delay-ms 1500
-cgp auto install --reload-mode off                 # never reload automatically
+cgp auto install --reload-mode off                 # never relaunch automatically
 ```
 
 - `prompt`: safest default for active coding sessions
 - `auto`: best for users who want zero-click recovery after Cursor updates
-- `off`: only patch and notify; reload manually later
+- `off`: only patch and notify; relaunch manually later
 - If `cgp` is missing and network download fails repeatedly, the auto-patcher will fallback to local cached cgp bundles.
 
 ## Auto-update

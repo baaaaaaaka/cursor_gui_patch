@@ -16,8 +16,17 @@ PROJECT_DIR = SCRIPT_DIR.parent
 TABLE_PATH = PROJECT_DIR / "docs" / "cursor_compatibility.md"
 TESTED_PATH = SCRIPT_DIR / "cursor_tested_versions.txt"
 
-HEADER = "| Cursor Version | Commit | Date | Status |"
-SEPARATOR = "|----------------|--------|------|--------|"
+TARGET_COLUMNS = [
+    ("linux-server", "Linux Server"),
+    ("linux-gui", "Linux GUI"),
+    ("macos-gui", "macOS GUI"),
+    ("windows-gui", "Windows GUI"),
+    ("hot-patch-guard", "Hot Patch Guard"),
+]
+REQUIRED_TARGETS = [target for target, _ in TARGET_COLUMNS]
+TABLE_COLUMNS = ["Cursor Version", "Commit", "Date"] + [label for _, label in TARGET_COLUMNS] + ["Status"]
+HEADER = "| " + " | ".join(TABLE_COLUMNS) + " |"
+SEPARATOR = "|" + "|".join("-" * (len(col) + 2) for col in TABLE_COLUMNS) + "|"
 
 
 def load_existing_table() -> Dict[str, Dict[str, str]]:
@@ -63,6 +72,39 @@ def load_tested_versions() -> Dict[str, Dict[str, str]]:
     return versions
 
 
+def load_result_matrix(results_dir: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Load result files as {target: {version: result}}."""
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for json_file in sorted(results_dir.glob("*.json")):
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        target = json_file.stem
+        payload: Dict[str, Any]
+        if isinstance(data, dict) and isinstance(data.get("target"), str) and isinstance(data.get("results"), dict):
+            target = data["target"]
+            payload = data["results"]
+        elif isinstance(data, dict):
+            payload = data
+        else:
+            continue
+        version_map: Dict[str, Dict[str, Any]] = {}
+        for version, result in payload.items():
+            if isinstance(version, str) and isinstance(result, dict):
+                version_map[version] = result
+        if version_map:
+            out[target] = version_map
+    return out
+
+
+def _overall_status(result_matrix: Dict[str, Dict[str, Dict[str, Any]]], version: str) -> str:
+    return "pass" if all(
+        result_matrix.get(target, {}).get(version, {}).get("status") == "pass"
+        for target in REQUIRED_TARGETS
+    ) else "fail"
+
+
 def render_table(rows: Dict[str, Dict[str, str]]) -> str:
     """Render markdown table."""
     lines = [
@@ -77,8 +119,11 @@ def render_table(rows: Dict[str, Dict[str, str]]) -> str:
         row = rows[version]
         commit = row.get("Commit", row.get("commit", ""))[:8]
         date = row.get("Date", row.get("date", ""))
-        status = row.get("Status", row.get("status", "unknown"))
-        lines.append(f"| {version} | {commit} | {date} | {status} |")
+        values = [version, commit, date]
+        for _, label in TARGET_COLUMNS:
+            values.append(row.get(label, "missing"))
+        values.append(row.get("Status", row.get("status", "unknown")))
+        lines.append("| " + " | ".join(values) + " |")
     lines.append("")
     return "\n".join(lines)
 
@@ -105,15 +150,7 @@ def main() -> None:
     missing = json.loads(args.missing_json)
     results_dir = Path(args.results_dir)
 
-    # Load existing test results.
-    test_results: Dict[str, Dict[str, Any]] = {}
-    for json_file in results_dir.glob("*.json"):
-        try:
-            data = json.loads(json_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                test_results.update(data)
-        except Exception:
-            continue
+    result_matrix = load_result_matrix(results_dir)
 
     # Load existing data.
     table_rows = load_existing_table()
@@ -124,19 +161,21 @@ def main() -> None:
     for entry in missing:
         version = entry["version"]
         commit = entry["commit"]
-        result = test_results.get(version, {})
-        status = result.get("status", "unknown")
+        overall_status = _overall_status(result_matrix, version)
 
-        table_rows[version] = {
+        row = {
             "Cursor Version": version,
             "Commit": commit,
             "Date": today,
-            "Status": status,
+            "Status": overall_status,
         }
+        for target, label in TARGET_COLUMNS:
+            row[label] = str(result_matrix.get(target, {}).get(version, {}).get("status", "missing"))
+        table_rows[version] = row
         tested[version] = {
             "commit": commit,
             "date": today,
-            "status": status,
+            "status": overall_status,
         }
 
     # Write files.

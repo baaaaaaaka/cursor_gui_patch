@@ -36,6 +36,7 @@ class PatchReport:
     """Report for a patch or unpatch operation."""
     scanned: int = 0
     patched: List[Path] = field(default_factory=list)
+    dry_run: bool = False
     already_patched: int = 0
     skipped_not_applicable: int = 0
     skipped_cached: int = 0
@@ -70,7 +71,11 @@ class PatchReport:
             if _has_permission_error(self.errors):
                 lines.append("")
                 lines.append(_permission_hint())
-        if not self.errors:
+        if not self.errors and self.patched and not self.dry_run:
+            lines.append("")
+            lines.append(
+                "Important: If Cursor was running while patching, fully relaunch Cursor now."
+            )
             lines.append("")
             lines.append("Tip: If Cursor behaves unexpectedly after patching, run:")
             lines.append("  cgp unpatch")

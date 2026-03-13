@@ -106,15 +106,15 @@ def _generate_package_json(
                             "enum": ["prompt", "auto", "off"],
                             "default": mode,
                             "description": (
-                                "Reload behavior after cgp patches files. "
-                                "prompt=ask, auto=reload automatically, off=never reload."
+                                "Relaunch behavior after cgp patches files. "
+                                "prompt=ask, auto=relaunch automatically, off=never relaunch."
                             ),
                         },
                         "cgp.autoPatcher.reloadDelayMs": {
                             "type": "integer",
                             "minimum": 0,
                             "default": delay_ms,
-                            "description": "Delay before auto reload (milliseconds).",
+                            "description": "Delay before auto relaunch (milliseconds).",
                         },
                     },
                 },
@@ -364,32 +364,156 @@ def _generate_extension_js() -> str:
         async function handleReloadAfterPatch(patchedCount) {
             const cfg = getReloadConfig();
             const hasDirty = hasDirtyEditors();
+            if (isRemoteWindow()) {
+                await handleRemoteRefreshAfterPatch(patchedCount, cfg, hasDirty);
+                return;
+            }
+            await handleLocalRefreshAfterPatch(patchedCount, cfg, hasDirty);
+        }
 
+        async function handleLocalRefreshAfterPatch(patchedCount, cfg, hasDirty) {
             if (cfg.mode === 'auto' && !hasDirty) {
                 vscode.window.showInformationMessage(
-                    `CGP: Patched ${patchedCount} file(s). Reloading...`
+                    `CGP: Patched ${patchedCount} file(s). Relaunching Cursor...`
                 );
-                setTimeout(() => {
-                    vscode.commands.executeCommand('workbench.action.reloadWindow');
-                }, cfg.delayMs);
+                await relaunchCursorApp(cfg.delayMs);
                 return;
             }
 
             if (cfg.mode === 'off') {
-                vscode.window.showInformationMessage(
-                    `CGP: Patched ${patchedCount} file(s). Reload manually to apply.`
+                vscode.window.showWarningMessage(
+                    `CGP: Patched ${patchedCount} file(s). Fully relaunch Cursor before opening new windows.`
                 );
                 return;
             }
 
             // Prompt mode, or auto mode fallback when there are unsaved files.
             const msg = hasDirty && cfg.mode === 'auto'
-                ? `CGP: Patched ${patchedCount} file(s). Unsaved files detected. Click Reload when ready.`
-                : `CGP: Patched ${patchedCount} file(s). Reload to apply.`;
-            const choice = await vscode.window.showInformationMessage(msg, 'Reload');
-            if (choice === 'Reload') {
-                await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                ? `CGP: Patched ${patchedCount} file(s). Unsaved files detected. Save them, then relaunch Cursor to refresh all windows.`
+                : `CGP: Patched ${patchedCount} file(s). Relaunch Cursor to refresh all windows.`;
+            const choice = await vscode.window.showWarningMessage(
+                msg,
+                { modal: true },
+                'Relaunch Cursor',
+                'Later'
+            );
+            if (choice === 'Relaunch Cursor') {
+                await relaunchCursorApp(cfg.delayMs);
             }
+        }
+
+        async function handleRemoteRefreshAfterPatch(patchedCount, cfg, hasDirty) {
+            if (cfg.mode === 'auto' && !hasDirty) {
+                vscode.window.showInformationMessage(
+                    `CGP: Patched ${patchedCount} file(s). Reloading this window...`
+                );
+                await fallbackReloadWindow();
+                return;
+            }
+
+            if (cfg.mode === 'off') {
+                vscode.window.showWarningMessage(
+                    `CGP: Patched ${patchedCount} file(s). Reload this window or reconnect later to refresh the remote server.`
+                );
+                return;
+            }
+
+            const msg = hasDirty && cfg.mode === 'auto'
+                ? `CGP: Patched ${patchedCount} file(s). Unsaved files detected. Save them, then reload this window to refresh the remote server.`
+                : `CGP: Patched ${patchedCount} file(s). Reload this window to refresh the remote server.`;
+            const choice = await vscode.window.showWarningMessage(
+                msg,
+                { modal: true },
+                'Reload Window',
+                'Later'
+            );
+            if (choice === 'Reload Window') {
+                await fallbackReloadWindow();
+            }
+        }
+
+        async function relaunchCursorApp(delayMs) {
+            if (!canRelaunchCursorApp()) {
+                await fallbackReloadWindow();
+                return;
+            }
+
+            const scheduled = scheduleCursorRelaunch(delayMs);
+            if (!scheduled) {
+                await fallbackReloadWindow();
+                return;
+            }
+
+            try {
+                await vscode.commands.executeCommand('workbench.action.quit');
+            } catch (_) {
+                await fallbackReloadWindow();
+            }
+        }
+
+        function canRelaunchCursorApp() {
+            return !isRemoteWindow() && !!getCursorExecPath();
+        }
+
+        function isRemoteWindow() {
+            try {
+                return !!(vscode.env && vscode.env.remoteName);
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function getCursorExecPath() {
+            if (isRemoteWindow()) return '';
+            const appPath = process.execPath;
+            return typeof appPath === 'string' && appPath ? appPath : '';
+        }
+
+        async function fallbackReloadWindow() {
+            try {
+                await vscode.commands.executeCommand('workbench.action.reloadWindow');
+            } catch (_) {}
+        }
+
+        function scheduleCursorRelaunch(delayMs) {
+            const appPath = getCursorExecPath();
+            if (!appPath) return false;
+            const currentPid = toInt(process.pid, 0);
+            if (currentPid <= 0) return false;
+
+            const delaySecs = Math.max(1, Math.ceil(Math.max(0, delayMs) / 1000));
+            const waitTimeoutSecs = Math.max(delaySecs + 30, 180);
+
+            try {
+                let child;
+                if (process.platform === 'win32') {
+                    const comspec = process.env.COMSPEC || 'cmd.exe';
+                    const escapedApp = String(appPath).replace(/"/g, '""');
+                    const script = `for /L %i in (1,1,${waitTimeoutSecs}) do @(tasklist /FI "PID eq ${currentPid}" 2>nul | find "${currentPid}" >nul && (ping 127.0.0.1 -n 2 >nul) || (ping 127.0.0.1 -n ${delaySecs + 1} >nul && start "" "${escapedApp}" & exit))`;
+                    child = execFile(comspec, ['/d', '/s', '/c', script], {
+                        detached: true,
+                        stdio: 'ignore',
+                        windowsHide: true,
+                    });
+                } else {
+                    const script = `i=0; while [ "$i" -lt ${waitTimeoutSecs} ]; do if ! kill -0 ${currentPid} 2>/dev/null; then sleep ${delaySecs}; ${quoteForShell(appPath)} >/dev/null 2>&1 & exit 0; fi; i=$((i+1)); sleep 1; done; exit 0`;
+                    child = execFile('sh', ['-lc', script], {
+                        detached: true,
+                        stdio: 'ignore',
+                    });
+                }
+
+                if (child && typeof child.unref === 'function') {
+                    child.unref();
+                }
+                return true;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function quoteForShell(value) {
+            return `"${String(value).replace(/(["\\\\$`])/g, '\\\\$1')}"`;
         }
 
         function getReloadConfig() {

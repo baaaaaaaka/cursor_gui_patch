@@ -14,155 +14,192 @@ concurrency:
 
 jobs:
   detect:
-    name: Detect new Cursor versions
+    name: Detect new Cursor version
     runs-on: ubuntu-latest
     outputs:
-      missing_versions: ${{ steps.detect.outputs.missing_versions }}
+      needs_test: ${{ steps.detect.outputs.needs_test }}
+      version: ${{ steps.detect.outputs.version }}
+      commit: ${{ steps.detect.outputs.commit }}
+      linux_server_url: ${{ steps.detect.outputs.linux_server_url }}
+      linux_gui_url: ${{ steps.detect.outputs.linux_gui_url }}
+      macos_gui_url: ${{ steps.detect.outputs.macos_gui_url }}
+      windows_gui_url: ${{ steps.detect.outputs.windows_gui_url }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect versions to test
+      - name: Detect version to test
         id: detect
         shell: bash
         run: |
           set -euo pipefail
-          # Get latest Cursor version info via download API.
-          resp="$(curl -fsSL "https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable" 2>/dev/null || true)"
-          if [ -z "$resp" ]; then
-            echo "Failed to fetch Cursor release info" >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
 
-          version="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('version',''))")"
-          commit="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('commitSha',''))")"
-          reh_url="$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rehUrl',''))")"
+          api_base = "https://www.cursor.com/api/download?releaseTrack=stable&platform="
+          headers = {"User-Agent": "cursor-gui-patch-compat"}
+          targets = {
+              "linux_server_url": "linux-x64",
+              "linux_gui_url": "linux-x64",
+              "macos_gui_url": "darwin-arm64",
+              "windows_gui_url": "win32-x64",
+          }
 
-          if [ -z "$version" ] || [ -z "$commit" ]; then
-            echo "Could not parse Cursor version info" >&2
-            echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          def fetch(platform: str) -> dict:
+              req = urllib.request.Request(api_base + platform, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.load(resp)
 
-          echo "Cursor latest: $version ($commit)"
+          linux_info = fetch("linux-x64")
+          version = str(linux_info.get("version", "")).strip()
+          commit = str(linux_info.get("commitSha", "")).strip()
+          if not version or not commit:
+              raise SystemExit("Could not parse latest Cursor version info")
 
-          # Check if already tested successfully (skip only if status is "pass").
-          if grep -q "^${version} .* pass$" scripts/cursor_tested_versions.txt 2>/dev/null; then
-            echo "Version $version already tested and passed."
-            echo "missing_versions=[]" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          downloads = {
+              "linux_server_url": str(linux_info.get("rehUrl", "")).strip(),
+              "linux_gui_url": str(linux_info.get("downloadUrl", "")).strip(),
+          }
+          for output_name, platform in targets.items():
+              if output_name in downloads:
+                  continue
+              info = fetch(platform)
+              downloads[output_name] = str(info.get("downloadUrl", "")).strip()
 
-          echo "missing_versions=[{\"version\":\"$version\",\"commit\":\"$commit\",\"reh_url\":\"$reh_url\"}]" >> "$GITHUB_OUTPUT"
+          if not all(downloads.values()):
+              raise SystemExit(f"Missing download URLs: {downloads}")
 
-  test:
-    name: Test patch on Cursor ${{ fromJSON(needs.detect.outputs.missing_versions)[0].version }}
+          tested_path = Path("scripts/cursor_tested_versions.txt")
+          needs_test = True
+          if tested_path.exists():
+              for line in tested_path.read_text(encoding="utf-8").splitlines():
+                  parts = line.split()
+                  if len(parts) >= 4 and parts[0] == version and parts[3] == "pass":
+                      needs_test = False
+                      break
+
+          with open("/tmp/cursor-compat-outputs.txt", "w", encoding="utf-8") as f:
+              f.write(f"version={version}\n")
+              f.write(f"commit={commit}\n")
+              f.write(f"needs_test={'true' if needs_test else 'false'}\n")
+              for key, value in downloads.items():
+                  f.write(f"{key}={value}\n")
+          PY
+
+          cat /tmp/cursor-compat-outputs.txt >> "$GITHUB_OUTPUT"
+
+  hot-patch-guard:
+    name: Hot patch guard
     runs-on: ubuntu-latest
     needs: detect
-    if: needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != ''
+    if: needs.detect.outputs.needs_test == 'true'
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Install cgp
-        run: pip install -e . pytest
+      - name: Install package and pytest
+        run: python -m pip install -e . pytest
 
-      - name: Test patch against new Cursor version
+      - name: Run hot-patch regression tests
         shell: bash
         env:
-          MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+          CURSOR_VERSION: ${{ needs.detect.outputs.version }}
+          CURSOR_COMMIT: ${{ needs.detect.outputs.commit }}
         run: |
-          set -euo pipefail
+          set +e
+          python -m pytest -q \
+            tests/test_hot_patch_regression.py \
+            tests/test_patching.py::TestExtensionHostHashes::test_patch_updates_hashes \
+            tests/test_report.py::TestPatchReportSummary::test_includes_relaunch_hint_when_successful
+          status=$?
+          mkdir -p results
+          STATUS_WORD="fail"
+          if [ "$status" -eq 0 ]; then
+            STATUS_WORD="pass"
+          fi
+          export STATUS_WORD
           python3 - <<'PY'
           import json
           import os
-          import subprocess
-          import sys
-          import tempfile
-          import urllib.request
-          from pathlib import Path
 
-          versions = json.loads(os.environ["MISSING_VERSIONS_JSON"])
-          results = {}
-
-          for entry in versions:
-              version = entry["version"]
-              commit = entry["commit"]
-              reh_url = entry.get("reh_url", "")
-
-              # Use the rehUrl from the API directly (commit in rehUrl may differ from commitSha).
-              if not reh_url:
-                  reh_url = f"https://cursor.blob.core.windows.net/remote-releases/{commit}/vscode-reh-linux-x64.tar.gz"
-
-              print(f"Downloading Cursor Server {version} ({commit[:8]})...")
-              print(f"  URL: {reh_url}")
-
-              with tempfile.TemporaryDirectory() as tmpdir:
-                  archive = Path(tmpdir) / "server.tar.gz"
-                  try:
-                      urllib.request.urlretrieve(reh_url, str(archive))
-                  except Exception as e:
-                      print(f"  Download failed: {e}")
-                      results[version] = {"commit": commit, "status": "download_failed"}
-                      continue
-
-                  # Extract.
-                  subprocess.run(["tar", "-xzf", str(archive), "-C", tmpdir], check=True)
-
-                  # Find the server dir (usually "vscode-reh-linux-x64" or similar).
-                  server_dir = None
-                  for d in Path(tmpdir).iterdir():
-                      if d.is_dir() and d.name != "server.tar.gz":
-                          server_dir = d
-                          break
-
-                  if not server_dir:
-                      print(f"  Could not find server directory after extraction")
-                      results[version] = {"commit": commit, "status": "extract_failed"}
-                      continue
-
-                  print(f"  Extracted to: {server_dir.name}")
-
-                  # Run dry-run patch (--server-dir is a global arg, must come before subcommand).
-                  proc = subprocess.run(
-                      [sys.executable, "-m", "cursor_gui_patch", "--server-dir", str(server_dir), "patch", "--dry-run"],
-                      capture_output=True, text=True,
-                  )
-                  print(f"  Exit code: {proc.returncode}")
-                  print(f"  Output: {proc.stdout.strip()}")
-                  if proc.stderr.strip():
-                      print(f"  Stderr: {proc.stderr.strip()}")
-
-                  if proc.returncode == 0 and "Patched:" in proc.stdout:
-                      results[version] = {"commit": commit, "status": "pass"}
-                  else:
-                      results[version] = {"commit": commit, "status": "fail"}
-
-          Path("results").mkdir(exist_ok=True)
-          with open("results/linux.json", "w") as f:
-              json.dump(results, f, indent=2)
-
-          # Fail if any test failed.
-          for v, r in results.items():
-              if r["status"] != "pass":
-                  print(f"FAIL: {v} -> {r['status']}")
-                  sys.exit(1)
+          payload = {
+              "target": "hot-patch-guard",
+              "results": {
+                  os.environ["CURSOR_VERSION"]: {
+                      "commit": os.environ["CURSOR_COMMIT"],
+                      "status": os.environ["STATUS_WORD"],
+                  }
+              },
+          }
+          with open("results/hot-patch-guard.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, indent=2, sort_keys=True)
           PY
+          exit "$status"
 
-      - name: Upload results
+      - name: Upload hot-patch guard results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cursor-compat-results
-          path: results/
+          name: cursor-compat-results-hot-patch-guard
+          path: results/hot-patch-guard.json
+
+  compat:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    needs: detect
+    if: needs.detect.outputs.needs_test == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux-server
+            download_url: ${{ needs.detect.outputs.linux_server_url }}
+          - runner: ubuntu-latest
+            target: linux-gui
+            download_url: ${{ needs.detect.outputs.linux_gui_url }}
+          - runner: macos-14
+            target: macos-gui
+            download_url: ${{ needs.detect.outputs.macos_gui_url }}
+          - runner: windows-latest
+            target: windows-gui
+            download_url: ${{ needs.detect.outputs.windows_gui_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: python -m pip install -e .
+
+      - name: Run compatibility check
+        run: >
+          python scripts/cursor_compat_runner.py
+          --target "${{ matrix.target }}"
+          --version "${{ needs.detect.outputs.version }}"
+          --commit "${{ needs.detect.outputs.commit }}"
+          --download-url "${{ matrix.download_url }}"
+          --output "results/${{ matrix.target }}.json"
+          --artifacts-dir "compat-work/${{ matrix.target }}"
+
+      - name: Upload compatibility results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor-compat-results-${{ matrix.target }}
+          path: results/${{ matrix.target }}.json
 
   update:
     name: Update compatibility records
     runs-on: ubuntu-latest
-    needs: [detect, test]
-    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != '' }}
+    needs: [detect, hot-patch-guard, compat]
+    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.needs_test == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -170,17 +207,28 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: cursor-compat-results
+          pattern: cursor-compat-results-*
           path: results
+          merge-multiple: true
 
       - name: Update compatibility table
         shell: bash
         env:
-          MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+          CURSOR_VERSION: ${{ needs.detect.outputs.version }}
+          CURSOR_COMMIT: ${{ needs.detect.outputs.commit }}
         run: |
           set -euo pipefail
+          missing_json="$(python3 - <<'PY'
+          import json
+          import os
+          print(json.dumps([{
+              "version": os.environ["CURSOR_VERSION"],
+              "commit": os.environ["CURSOR_COMMIT"],
+          }]))
+          PY
+          )"
           python3 scripts/cursor_compat_sync.py \
-            --missing-json "$MISSING_VERSIONS_JSON" \
+            --missing-json "$missing_json" \
             --results-dir results
 
       - name: Commit changes

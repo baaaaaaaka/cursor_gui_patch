@@ -29,6 +29,23 @@ class TestPatchReportSummary:
         assert "Codesign FAILED" in s
         assert "sudo codesign --force --deep --sign -" in s
 
+    def test_includes_relaunch_hint_when_successful(self):
+        report = PatchReport(patched=[Path("/tmp/main.js")])
+        s = report.summary()
+        assert "fully relaunch Cursor now" in s
+        assert "cgp unpatch" in s
+
+    def test_omits_relaunch_hint_when_nothing_was_written(self):
+        report = PatchReport()
+        s = report.summary()
+        assert "fully relaunch Cursor now" not in s
+        assert "cgp unpatch" not in s
+
+    def test_omits_relaunch_hint_for_dry_run(self):
+        report = PatchReport(patched=[Path("/tmp/main.js")], dry_run=True)
+        s = report.summary()
+        assert "fully relaunch Cursor now" not in s
+
 
 class TestUnpatchReportSummary:
     def test_includes_permission_hint_on_linux(self):

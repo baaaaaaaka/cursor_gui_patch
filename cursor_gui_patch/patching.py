@@ -41,7 +41,7 @@ def patch(
     if installations is None:
         installations = discover_all(server_dir=server_dir, gui_dir=gui_dir)
 
-    report = PatchReport()
+    report = PatchReport(dry_run=dry_run)
 
     for inst in installations:
         patched_before = len(report.patched)

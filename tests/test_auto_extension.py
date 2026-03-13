@@ -117,6 +117,10 @@ class TestGenerateExtensionJs:
         assert "reloadMode" in js
         assert "reloadDelayMs" in js
         assert "hasDirtyEditors" in js
+        assert "Relaunch Cursor" in js
+        assert "workbench.action.quit" in js
+        assert "scheduleCursorRelaunch" in js
+        assert "fallbackReloadWindow" in js
 
     def test_contains_download_cache_fallback_logic(self):
         js = _generate_extension_js()
@@ -124,6 +128,28 @@ class TestGenerateExtensionJs:
         assert "installFromCache" in js
         assert "download_state.json" in js
         assert "cacheDir" in js
+
+    def test_contains_cross_platform_relaunch_logic(self):
+        js = _generate_extension_js()
+        assert "process.env.COMSPEC || 'cmd.exe'" in js
+        assert "tasklist /FI" in js
+        assert "kill -0" in js
+        assert "quoteForShell" in js
+        assert "start \"\" " in js
+        assert "process.pid" in js
+
+    def test_remote_windows_use_reload_instead_of_relaunch(self):
+        js = _generate_extension_js()
+        assert "vscode.env.remoteName" in js
+        assert "handleRemoteRefreshAfterPatch" in js
+        assert "Reload Window" in js
+        assert "refresh the remote server" in js
+
+    def test_relaunch_path_uses_local_exec_only(self):
+        js = _generate_extension_js()
+        assert "canRelaunchCursorApp" in js
+        assert "getCursorExecPath" in js
+        assert "if (isRemoteWindow()) return '';" in js
 
 
 class TestExtensionsRoot:
