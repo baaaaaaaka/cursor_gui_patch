@@ -209,6 +209,86 @@ def _safe_relative_folder_name(raw: str) -> Optional[str]:
     return "/".join(parts)
 
 
+def _nonempty_env_path(name: str) -> Optional[Path]:
+    """Return an environment-backed path when the variable is set."""
+    raw = os.environ.get(name)
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    return Path(value)
+
+
+def _dedupe_paths(paths: Sequence[Path]) -> List[Path]:
+    """Preserve order while dropping duplicate paths."""
+    seen = set()
+    unique: List[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _windows_gui_candidates_for_roots(
+    *,
+    local_appdata_roots: Sequence[Path] = (),
+    program_files_roots: Sequence[Path] = (),
+) -> List[Path]:
+    """Build GUI install candidates from Windows LocalAppData/Program Files roots."""
+    candidates: List[Path] = []
+    for local_root in local_appdata_roots:
+        candidates.extend([
+            local_root / "Programs" / "cursor" / "resources" / "app",
+            local_root / "cursor" / "resources" / "app",
+        ])
+    for program_root in program_files_roots:
+        candidates.append(program_root / "Cursor" / "resources" / "app")
+    return _dedupe_paths(candidates)
+
+
+def _native_windows_gui_candidates() -> List[Path]:
+    """Return Windows GUI install candidates from the current environment."""
+    local_appdata_roots: List[Path] = []
+    local_appdata = _nonempty_env_path("LOCALAPPDATA")
+    if local_appdata is not None:
+        local_appdata_roots.append(local_appdata)
+
+    program_files_roots: List[Path] = []
+    for name in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        root = _nonempty_env_path(name)
+        if root is not None:
+            program_files_roots.append(root)
+
+    return _windows_gui_candidates_for_roots(
+        local_appdata_roots=local_appdata_roots,
+        program_files_roots=program_files_roots,
+    )
+
+
+def _wsl_gui_candidates_from_mount_root(mnt_c: Path) -> List[Path]:
+    """Find Windows GUI install candidates from a mounted Windows drive in WSL."""
+    if not mnt_c.is_dir():
+        return []
+
+    users_dir = mnt_c / "Users"
+    local_appdata_roots: List[Path] = []
+    if users_dir.is_dir():
+        for user_dir in _ordered_wsl_user_dirs(_wsl_user_dirs(users_dir)):
+            local_appdata_roots.append(user_dir / "AppData" / "Local")
+
+    return _windows_gui_candidates_for_roots(
+        local_appdata_roots=local_appdata_roots,
+        program_files_roots=[
+            mnt_c / "Program Files",
+            mnt_c / "Program Files (x86)",
+        ],
+    )
+
+
 def discover_server_installations(
     *,
     explicit_dir: Optional[str] = None,
@@ -269,12 +349,7 @@ def _gui_candidates() -> List[Path]:
             home / "Applications/Cursor.app/Contents/Resources/app",
         ])
     elif platform == "win32":
-        local = Path(os.environ.get("LOCALAPPDATA", ""))
-        if local != Path(""):
-            candidates.extend([
-                local / "Programs" / "cursor" / "resources" / "app",
-                local / "cursor" / "resources" / "app",
-            ])
+        candidates.extend(_native_windows_gui_candidates())
     else:
         # Linux
         candidates.extend([
@@ -302,18 +377,7 @@ def _is_wsl() -> bool:
 
 def _wsl_gui_candidates() -> List[Path]:
     """Find Cursor GUI installations in Windows filesystem from WSL."""
-    candidates: List[Path] = []
-    mnt_c = Path("/mnt/c")
-    if not mnt_c.is_dir():
-        return candidates
-    users_dir = mnt_c / "Users"
-    if not users_dir.is_dir():
-        return candidates
-
-    for user_dir in _ordered_wsl_user_dirs(_wsl_user_dirs(users_dir)):
-        candidate = user_dir / "AppData" / "Local" / "Programs" / "cursor" / "resources" / "app"
-        candidates.append(candidate)
-    return candidates
+    return _wsl_gui_candidates_from_mount_root(Path("/mnt/c"))
 
 
 def discover_gui_installations(

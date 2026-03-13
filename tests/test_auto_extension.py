@@ -22,6 +22,7 @@ from cursor_gui_patch.auto_extension import (
     _make_registry_entry,
     _read_extensions_json,
     _to_vscode_uri_path,
+    _wsl_gui_extensions_root,
     install,
     status,
     uninstall,
@@ -219,6 +220,35 @@ class TestExtensionsRoot:
         mock_sys.platform = "win32"
         result = _extensions_root("server")
         assert result == Path.home() / ".cursor-server" / "extensions"
+
+
+class TestWslGuiExtensionsRoot:
+    @mock.patch("cursor_gui_patch.auto_extension.Path")
+    def test_returns_first_existing_windows_extensions_dir(self, mock_path, tmp_path: Path):
+        users_dir = tmp_path / "Users"
+        alice_ext = users_dir / "alice" / ".cursor" / "extensions"
+        bob_ext = users_dir / "bob" / ".cursor" / "extensions"
+        alice_ext.mkdir(parents=True)
+        bob_ext.mkdir(parents=True)
+        mock_path.return_value = users_dir
+
+        with mock.patch.dict(os.environ, {"CGP_WINDOWS_USER": "bob"}, clear=True):
+            result = _wsl_gui_extensions_root()
+
+        assert result == bob_ext
+
+    @mock.patch("cursor_gui_patch.auto_extension.Path")
+    def test_returns_none_when_users_dir_missing(self, mock_path, tmp_path: Path):
+        mock_path.return_value = tmp_path / "missing"
+        assert _wsl_gui_extensions_root() is None
+
+    @mock.patch("cursor_gui_patch.auto_extension.Path")
+    def test_returns_none_when_no_user_has_cursor_extensions(self, mock_path, tmp_path: Path):
+        users_dir = tmp_path / "Users"
+        (users_dir / "alice").mkdir(parents=True)
+        (users_dir / "bob").mkdir()
+        mock_path.return_value = users_dir
+        assert _wsl_gui_extensions_root() is None
 
 
 class TestToVscodeUriPath:

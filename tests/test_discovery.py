@@ -14,14 +14,18 @@ from cursor_gui_patch.discovery import (
     CursorInstallation,
     EXTENSION_TARGETS,
     _choose_wsl_user_dir,
+    _dedupe_paths,
     _get_server_data_folder_name,
     _gui_candidates,
     _is_cursor_app_root,
     _is_wsl,
+    _native_windows_gui_candidates,
+    _nonempty_env_path,
     _safe_relative_folder_name,
     _preferred_windows_usernames,
     _version_id_from_path,
     _wsl_user_dirs,
+    _wsl_gui_candidates_from_mount_root,
     discover_all,
     discover_gui_installations,
     discover_server_installations,
@@ -95,6 +99,21 @@ class TestCursorInstallation(unittest.TestCase):
             self.assertEqual(len(targets), 1)
             self.assertEqual(targets[0].extension, "cursor-agent-exec")
             self.assertEqual(targets[0].patch_names, ["autorun"])
+
+    def test_target_files_includes_workbench_target_for_gui_install(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _make_fake_installation(root, extensions=["cursor-agent-exec"])
+            workbench = root / "out" / "vs" / "workbench" / "workbench.desktop.main.js"
+            workbench.parent.mkdir(parents=True, exist_ok=True)
+            workbench.write_text("// workbench placeholder")
+
+            inst = CursorInstallation(kind="gui", root=root, version_id="gui")
+            targets = inst.target_files()
+
+            names = {t.extension for t in targets}
+            self.assertIn("cursor-agent-exec", names)
+            self.assertIn("workbench.desktop.main.js", names)
 
 
 class TestDiscoverServer(unittest.TestCase):
@@ -223,21 +242,49 @@ class TestGuiCandidates:
         assert any("Cursor.app/Contents/Resources/app" in p for p in paths)
         assert len(candidates) == 2
 
-    @mock.patch.dict(os.environ, {"LOCALAPPDATA": "/fake/AppData/Local"})
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LOCALAPPDATA": "/fake/AppData/Local",
+            "ProgramFiles": "/fake/Program Files",
+        },
+        clear=True,
+    )
+    def test_native_windows_candidates_include_user_and_system_paths(self):
+        candidates = _native_windows_gui_candidates()
+        paths = [c.as_posix() for c in candidates]
+        assert "/fake/AppData/Local/Programs/cursor/resources/app" in paths
+        assert "/fake/AppData/Local/cursor/resources/app" in paths
+        assert "/fake/Program Files/Cursor/resources/app" in paths
+        assert len(candidates) == 3
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_native_windows_candidates_empty_without_env(self):
+        candidates = _native_windows_gui_candidates()
+        assert len(candidates) == 0
+
+    @mock.patch.dict(os.environ, {"ProgramFiles(x86)": "/fake/Program Files (x86)"}, clear=True)
+    def test_native_windows_candidates_include_x86_system_path(self):
+        candidates = _native_windows_gui_candidates()
+        paths = [c.as_posix() for c in candidates]
+        assert paths == ["/fake/Program Files (x86)/Cursor/resources/app"]
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LOCALAPPDATA": "/fake/AppData/Local",
+            "ProgramFiles": "/fake/Program Files",
+        },
+        clear=True,
+    )
     @mock.patch("cursor_gui_patch.discovery.sys")
-    def test_win32_returns_program_paths(self, mock_sys):
+    def test_win32_gui_candidates_use_native_windows_rules(self, mock_sys):
         mock_sys.platform = "win32"
         candidates = _gui_candidates()
         paths = [c.as_posix() for c in candidates]
-        assert any("cursor" in p.lower() and "resources" in p for p in paths)
-        assert len(candidates) == 2
-
-    @mock.patch.dict(os.environ, {"LOCALAPPDATA": ""})
-    @mock.patch("cursor_gui_patch.discovery.sys")
-    def test_win32_empty_localappdata_returns_nothing(self, mock_sys):
-        mock_sys.platform = "win32"
-        candidates = _gui_candidates()
-        assert len(candidates) == 0
+        assert "/fake/AppData/Local/Programs/cursor/resources/app" in paths
+        assert "/fake/AppData/Local/cursor/resources/app" in paths
+        assert "/fake/Program Files/Cursor/resources/app" in paths
 
     @mock.patch("cursor_gui_patch.discovery._is_wsl", return_value=False)
     @mock.patch("cursor_gui_patch.discovery.sys")
@@ -265,6 +312,24 @@ class TestGuiCandidates:
         assert any("/opt/cursor" in p for p in paths)
         assert any("/mnt/c/" in p for p in paths)
 
+    def test_wsl_mount_candidates_include_user_and_system_paths(self, tmp_path: Path):
+        mnt_c = tmp_path / "mnt" / "c"
+        user_root = mnt_c / "Users" / "alice"
+        (user_root / "AppData" / "Local").mkdir(parents=True)
+        (mnt_c / "Program Files").mkdir(parents=True)
+        (mnt_c / "Program Files (x86)").mkdir(parents=True)
+
+        candidates = _wsl_gui_candidates_from_mount_root(mnt_c)
+        paths = [c.as_posix() for c in candidates]
+
+        assert str(user_root / "AppData" / "Local" / "Programs" / "cursor" / "resources" / "app") in paths
+        assert str(user_root / "AppData" / "Local" / "cursor" / "resources" / "app") in paths
+        assert str(mnt_c / "Program Files" / "Cursor" / "resources" / "app") in paths
+        assert str(mnt_c / "Program Files (x86)" / "Cursor" / "resources" / "app") in paths
+
+    def test_wsl_mount_candidates_empty_when_mount_missing(self, tmp_path: Path):
+        assert _wsl_gui_candidates_from_mount_root(tmp_path / "missing") == []
+
 
 class TestWslUserSelection:
     def test_preferred_windows_usernames(self):
@@ -281,6 +346,19 @@ class TestWslUserSelection:
         assert names[0] == "winuser"
         assert "other" in names
         assert "linux" in names
+
+    def test_preferred_windows_usernames_skips_blank_values(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CGP_WINDOWS_USER": "  ",
+                "USERNAME": "",
+                "USER": "alice",
+            },
+            clear=True,
+        ):
+            names = _preferred_windows_usernames()
+        assert names == ["alice"]
 
     def test_wsl_user_dirs_skips_system_users(self, tmp_path: Path):
         users = tmp_path / "Users"
@@ -304,15 +382,35 @@ class TestWslUserSelection:
             chosen = _choose_wsl_user_dir(users)
         assert chosen == tmp_path / "alice"
 
+    def test_choose_wsl_user_dir_empty(self):
+        assert _choose_wsl_user_dir([]) is None
+
     def test_safe_relative_folder_name_valid(self):
         assert _safe_relative_folder_name(".cursor-server") == ".cursor-server"
         assert _safe_relative_folder_name("cursor/server") == "cursor/server"
 
     def test_safe_relative_folder_name_rejects_unsafe(self):
+        assert _safe_relative_folder_name(None) is None
+        assert _safe_relative_folder_name("") is None
+        assert _safe_relative_folder_name("  ") is None
+        assert _safe_relative_folder_name(".") is None
         assert _safe_relative_folder_name("/abs/path") is None
         assert _safe_relative_folder_name("../escape") is None
         assert _safe_relative_folder_name("a/../b") is None
         assert _safe_relative_folder_name("C:\\abs\\path") is None
+
+    @mock.patch.dict(os.environ, {"LOCALAPPDATA": "   "}, clear=True)
+    def test_nonempty_env_path_skips_blank_values(self):
+        assert _nonempty_env_path("LOCALAPPDATA") is None
+
+    def test_dedupe_paths_preserves_order(self):
+        paths = [
+            Path("/a"),
+            Path("/b"),
+            Path("/a"),
+            Path("/c"),
+        ]
+        assert _dedupe_paths(paths) == [Path("/a"), Path("/b"), Path("/c")]
 
 
 class TestDiscoverServerAutoDiscover:
