@@ -27,6 +27,6 @@ def test_release_workflow_smoke_installs_linux_bundle_on_old_distros():
 def test_linux_release_builder_pins_manylinux_baseline():
     text = Path("scripts/build_linux_binary_docker.sh").read_text(encoding="utf-8")
 
-    assert 'quay.io/pypa/manylinux_2_28_x86_64' in text
-    assert 'quay.io/pypa/manylinux_2_28_aarch64' in text
-    assert 'PYBIN="/opt/python/cp311-cp311/bin"' in text
+    assert 'IMAGE="rockylinux:8"' in text
+    assert 'PYBIN="python3.9"' in text
+    assert 'dnf install -y -q python39 python39-devel python39-pip binutils tar gzip' in text

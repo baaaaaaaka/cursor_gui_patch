@@ -4,21 +4,24 @@
 #   docker build -t cgp-builder .
 #   docker run --rm -v $(pwd)/out:/out cgp-builder
 #
-# The release build pins a manylinux_2_28 base so the generated bundle stays
-# runnable on our oldest supported Linux targets (for example Rocky 8).
+# The release build uses Rocky 8 plus CPython 3.9 with a shared library so the
+# generated bundle stays runnable on our oldest supported Linux targets.
 
-FROM quay.io/pypa/manylinux_2_28_x86_64
+FROM rockylinux:8
 
-ENV PYBIN=/opt/python/cp311-cp311/bin
+ENV PYBIN=python3.9
+
+RUN dnf install -y -q python39 python39-devel python39-pip binutils tar gzip && \
+    dnf clean all
 
 WORKDIR /build
 COPY . .
 
-RUN ${PYBIN}/python -m pip install -U pip setuptools wheel pyinstaller certifi && \
-    ${PYBIN}/python -m pip install -e .
+RUN ${PYBIN} -m pip install -U pip setuptools wheel pyinstaller certifi && \
+    ${PYBIN} -m pip install -e .
 
 CMD ["sh", "-c", \
-     "${PYBIN}/python -m PyInstaller --clean -n cgp --collect-data certifi \
+     "${PYBIN} -m PyInstaller --clean -n cgp --collect-data certifi \
        --specpath /tmp/_spec --distpath /tmp/_dist --workpath /tmp/_build \
        cursor_gui_patch/__main__.py && \
       tar -C /tmp/_dist -czf /out/cgp-linux-x86_64.tar.gz cgp"]
