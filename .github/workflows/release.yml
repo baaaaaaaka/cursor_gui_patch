@@ -28,7 +28,14 @@ jobs:
           print(__version__)
           PY
           )"
-          test "$TAG_VERSION" = "$PKG_VERSION"
+          case "$TAG_VERSION" in
+            "$PKG_VERSION"|"$PKG_VERSION"-rc*)
+              ;;
+            *)
+              echo "Tag $TAG_VERSION does not match package version $PKG_VERSION"
+              exit 1
+              ;;
+          esac
 
   build-linux-x86_64:
     runs-on: ubuntu-latest
