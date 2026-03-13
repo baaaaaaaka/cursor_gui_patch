@@ -291,11 +291,15 @@ jobs:
             "${{ matrix.image }}" \
             bash -lc '
               set -euxo pipefail
-              if command -v apt-get >/dev/null 2>&1; then
-                apt-get update -qq
-                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tar coreutils >/dev/null 2>&1
-              elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y -q tar coreutils >/dev/null 2>&1
+              if ! command -v tar >/dev/null 2>&1 || ! command -v sha256sum >/dev/null 2>&1; then
+                if command -v apt-get >/dev/null 2>&1; then
+                  apt-get update -qq
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tar coreutils >/dev/null 2>&1
+                elif command -v dnf >/dev/null 2>&1; then
+                  dnf install -y -q tar coreutils >/dev/null 2>&1
+                elif command -v microdnf >/dev/null 2>&1; then
+                  microdnf install -y tar coreutils >/dev/null 2>&1
+                fi
               fi
 
               export CGP_INSTALL_FROM_DIR="/work/dist"
@@ -362,6 +366,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           files: |
             dist/cgp-*
             dist/checksums.txt
