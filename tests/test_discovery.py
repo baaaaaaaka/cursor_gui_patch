@@ -286,6 +286,22 @@ class TestGuiCandidates:
         assert "/fake/AppData/Local/cursor/resources/app" in paths
         assert "/fake/Program Files/Cursor/resources/app" in paths
 
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LOCALAPPDATA": "/fake/AppData/Local",
+            "ProgramFiles": "/fake/Program Files",
+        },
+        clear=True,
+    )
+    @mock.patch("cursor_gui_patch.discovery.Path.home", side_effect=RuntimeError("home lookup should be skipped"))
+    @mock.patch("cursor_gui_patch.discovery.sys")
+    def test_win32_gui_candidates_do_not_require_home_dir(self, mock_sys, _):
+        mock_sys.platform = "win32"
+        candidates = _gui_candidates()
+        paths = [c.as_posix() for c in candidates]
+        assert "/fake/AppData/Local/Programs/cursor/resources/app" in paths
+
     @mock.patch("cursor_gui_patch.discovery._is_wsl", return_value=False)
     @mock.patch("cursor_gui_patch.discovery.sys")
     def test_linux_returns_standard_paths(self, mock_sys, _):
@@ -322,10 +338,10 @@ class TestGuiCandidates:
         candidates = _wsl_gui_candidates_from_mount_root(mnt_c)
         paths = [c.as_posix() for c in candidates]
 
-        assert str(user_root / "AppData" / "Local" / "Programs" / "cursor" / "resources" / "app") in paths
-        assert str(user_root / "AppData" / "Local" / "cursor" / "resources" / "app") in paths
-        assert str(mnt_c / "Program Files" / "Cursor" / "resources" / "app") in paths
-        assert str(mnt_c / "Program Files (x86)" / "Cursor" / "resources" / "app") in paths
+        assert (user_root / "AppData" / "Local" / "Programs" / "cursor" / "resources" / "app").as_posix() in paths
+        assert (user_root / "AppData" / "Local" / "cursor" / "resources" / "app").as_posix() in paths
+        assert (mnt_c / "Program Files" / "Cursor" / "resources" / "app").as_posix() in paths
+        assert (mnt_c / "Program Files (x86)" / "Cursor" / "resources" / "app").as_posix() in paths
 
     def test_wsl_mount_candidates_empty_when_mount_missing(self, tmp_path: Path):
         assert _wsl_gui_candidates_from_mount_root(tmp_path / "missing") == []

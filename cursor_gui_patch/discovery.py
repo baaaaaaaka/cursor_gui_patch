@@ -340,10 +340,10 @@ def discover_server_installations(
 def _gui_candidates() -> List[Path]:
     """Return platform-specific candidate paths for Cursor GUI installations."""
     candidates: List[Path] = []
-    home = Path.home()
     platform = sys.platform
 
     if platform == "darwin":
+        home = Path.home()
         candidates.extend([
             Path("/Applications/Cursor.app/Contents/Resources/app"),
             home / "Applications/Cursor.app/Contents/Resources/app",
@@ -352,6 +352,7 @@ def _gui_candidates() -> List[Path]:
         candidates.extend(_native_windows_gui_candidates())
     else:
         # Linux
+        home = Path.home()
         candidates.extend([
             Path("/opt/cursor/resources/app"),
             Path("/usr/share/cursor/resources/app"),
