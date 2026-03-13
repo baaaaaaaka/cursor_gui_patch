@@ -4,6 +4,45 @@ on:
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
+    inputs:
+      code_ref:
+        description: "Optional git ref for the package code under test"
+        required: false
+        type: string
+      force_run:
+        description: "Run even if the target Cursor version is already marked pass"
+        required: false
+        default: false
+        type: boolean
+      record_results:
+        description: "Write results back to compatibility records"
+        required: false
+        default: false
+        type: boolean
+      force_version:
+        description: "Optional Cursor version override for backtests"
+        required: false
+        type: string
+      force_commit:
+        description: "Commit SHA paired with force_version"
+        required: false
+        type: string
+      force_linux_server_url:
+        description: "Linux server download URL override"
+        required: false
+        type: string
+      force_linux_gui_url:
+        description: "Linux GUI download URL override"
+        required: false
+        type: string
+      force_macos_gui_url:
+        description: "macOS GUI download URL override"
+        required: false
+        type: string
+      force_windows_gui_url:
+        description: "Windows GUI download URL override"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -20,20 +59,37 @@ jobs:
       needs_test: ${{ steps.detect.outputs.needs_test }}
       version: ${{ steps.detect.outputs.version }}
       commit: ${{ steps.detect.outputs.commit }}
+      code_ref: ${{ steps.detect.outputs.code_ref }}
+      record_results: ${{ steps.detect.outputs.record_results }}
       linux_server_url: ${{ steps.detect.outputs.linux_server_url }}
       linux_gui_url: ${{ steps.detect.outputs.linux_gui_url }}
       macos_gui_url: ${{ steps.detect.outputs.macos_gui_url }}
       windows_gui_url: ${{ steps.detect.outputs.windows_gui_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect version to test
         id: detect
         shell: bash
+        env:
+          INPUT_CODE_REF: ${{ inputs.code_ref }}
+          INPUT_FORCE_RUN: ${{ inputs.force_run }}
+          INPUT_RECORD_RESULTS: ${{ inputs.record_results }}
+          INPUT_FORCE_VERSION: ${{ inputs.force_version }}
+          INPUT_FORCE_COMMIT: ${{ inputs.force_commit }}
+          INPUT_FORCE_LINUX_SERVER_URL: ${{ inputs.force_linux_server_url }}
+          INPUT_FORCE_LINUX_GUI_URL: ${{ inputs.force_linux_gui_url }}
+          INPUT_FORCE_MACOS_GUI_URL: ${{ inputs.force_macos_gui_url }}
+          INPUT_FORCE_WINDOWS_GUI_URL: ${{ inputs.force_windows_gui_url }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
+          import os
           import urllib.request
           from pathlib import Path
 
@@ -51,28 +107,69 @@ jobs:
               with urllib.request.urlopen(req, timeout=30) as resp:
                   return json.load(resp)
 
-          linux_info = fetch("linux-x64")
-          version = str(linux_info.get("version", "")).strip()
-          commit = str(linux_info.get("commitSha", "")).strip()
-          if not version or not commit:
-              raise SystemExit("Could not parse latest Cursor version info")
-
-          downloads = {
-              "linux_server_url": str(linux_info.get("rehUrl", "")).strip(),
-              "linux_gui_url": str(linux_info.get("downloadUrl", "")).strip(),
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          input_code_ref = str(os.environ.get("INPUT_CODE_REF", "")).strip()
+          input_force_run = os.environ.get("INPUT_FORCE_RUN", "").lower() == "true"
+          input_record_results = os.environ.get("INPUT_RECORD_RESULTS", "").lower() == "true"
+          code_ref = input_code_ref or str(os.environ.get("GITHUB_SHA", "")).strip()
+          force_downloads = {
+              "linux_server_url": str(os.environ.get("INPUT_FORCE_LINUX_SERVER_URL", "")).strip(),
+              "linux_gui_url": str(os.environ.get("INPUT_FORCE_LINUX_GUI_URL", "")).strip(),
+              "macos_gui_url": str(os.environ.get("INPUT_FORCE_MACOS_GUI_URL", "")).strip(),
+              "windows_gui_url": str(os.environ.get("INPUT_FORCE_WINDOWS_GUI_URL", "")).strip(),
           }
-          for output_name, platform in targets.items():
-              if output_name in downloads:
-                  continue
-              info = fetch(platform)
-              downloads[output_name] = str(info.get("downloadUrl", "")).strip()
+          force_version = str(os.environ.get("INPUT_FORCE_VERSION", "")).strip()
+          force_commit = str(os.environ.get("INPUT_FORCE_COMMIT", "")).strip()
+          has_force_override = any([force_version, force_commit, *force_downloads.values()])
+
+          if has_force_override:
+              missing = [
+                  name
+                  for name, value in {
+                      "force_version": force_version,
+                      "force_commit": force_commit,
+                      "force_linux_server_url": force_downloads["linux_server_url"],
+                      "force_linux_gui_url": force_downloads["linux_gui_url"],
+                      "force_macos_gui_url": force_downloads["macos_gui_url"],
+                      "force_windows_gui_url": force_downloads["windows_gui_url"],
+                  }.items()
+                  if not value
+              ]
+              if missing:
+                  raise SystemExit(
+                      "Manual compatibility override is incomplete; missing: "
+                      + ", ".join(missing)
+                  )
+              version = force_version
+              commit = force_commit
+              downloads = force_downloads
+          else:
+              linux_info = fetch("linux-x64")
+              version = str(linux_info.get("version", "")).strip()
+              commit = str(linux_info.get("commitSha", "")).strip()
+              if not version or not commit:
+                  raise SystemExit("Could not parse latest Cursor version info")
+
+              downloads = {
+                  "linux_server_url": str(linux_info.get("rehUrl", "")).strip(),
+                  "linux_gui_url": str(linux_info.get("downloadUrl", "")).strip(),
+              }
+              for output_name, platform in targets.items():
+                  if output_name in downloads:
+                      continue
+                  info = fetch(platform)
+                  downloads[output_name] = str(info.get("downloadUrl", "")).strip()
 
           if not all(downloads.values()):
               raise SystemExit(f"Missing download URLs: {downloads}")
 
           tested_path = Path("scripts/cursor_tested_versions.txt")
+          manual_backtest = event_name == "workflow_dispatch" and bool(
+              input_code_ref or has_force_override or input_force_run
+          )
+          record_results = event_name != "workflow_dispatch" or input_record_results
           needs_test = True
-          if tested_path.exists():
+          if tested_path.exists() and not manual_backtest:
               for line in tested_path.read_text(encoding="utf-8").splitlines():
                   parts = line.split()
                   if len(parts) >= 4 and parts[0] == version and parts[3] == "pass":
@@ -82,6 +179,8 @@ jobs:
           with open("/tmp/cursor-compat-outputs.txt", "w", encoding="utf-8") as f:
               f.write(f"version={version}\n")
               f.write(f"commit={commit}\n")
+              f.write(f"code_ref={code_ref}\n")
+              f.write(f"record_results={'true' if record_results else 'false'}\n")
               f.write(f"needs_test={'true' if needs_test else 'false'}\n")
               for key, value in downloads.items():
                   f.write(f"{key}={value}\n")
@@ -96,6 +195,15 @@ jobs:
     if: needs.detect.outputs.needs_test == 'true'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Materialize package code under test
+        if: ${{ needs.detect.outputs.code_ref != github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "${{ needs.detect.outputs.code_ref }}" -- cursor_gui_patch
 
       - uses: actions/setup-python@v5
         with:
@@ -170,6 +278,15 @@ jobs:
             download_url: ${{ needs.detect.outputs.windows_gui_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Materialize package code under test
+        if: ${{ needs.detect.outputs.code_ref != github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "${{ needs.detect.outputs.code_ref }}" -- cursor_gui_patch
 
       - uses: actions/setup-python@v5
         with:
@@ -199,9 +316,11 @@ jobs:
     name: Update compatibility records
     runs-on: ubuntu-latest
     needs: [detect, hot-patch-guard, compat]
-    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.needs_test == 'true' }}
+    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.needs_test == 'true' && needs.detect.outputs.record_results == 'true' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download results
         uses: actions/download-artifact@v4
