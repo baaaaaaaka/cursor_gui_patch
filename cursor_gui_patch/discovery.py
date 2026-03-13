@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - unavailable outside native Windows
+    winreg = None
 
 ENV_CURSOR_SERVER_DIR = "CGP_CURSOR_SERVER_DIR"
 ENV_CURSOR_GUI_DIR = "CGP_CURSOR_GUI_DIR"
@@ -30,6 +36,11 @@ WORKBENCH_TARGETS: Dict[str, Dict[str, object]] = {
 }
 
 _WSL_SKIP_USERS = {"public", "default", "default user", "all users"}
+_WINDOWS_APP_PATHS_CURSOR = r"Software\Microsoft\Windows\CurrentVersion\App Paths\Cursor.exe"
+_WINDOWS_UNINSTALL_KEYS = (
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+)
 
 
 @dataclass
@@ -220,12 +231,14 @@ def _nonempty_env_path(name: str) -> Optional[Path]:
     return Path(value)
 
 
-def _dedupe_paths(paths: Sequence[Path]) -> List[Path]:
+def _dedupe_paths(paths: Sequence[Path], *, case_insensitive: bool = False) -> List[Path]:
     """Preserve order while dropping duplicate paths."""
     seen = set()
     unique: List[Path] = []
     for path in paths:
-        key = str(path)
+        key = str(path).replace("\\", "/")
+        if case_insensitive:
+            key = key.lower()
         if key in seen:
             continue
         seen.add(key)
@@ -233,25 +246,163 @@ def _dedupe_paths(paths: Sequence[Path]) -> List[Path]:
     return unique
 
 
-def _windows_gui_candidates_for_roots(
+def _path_from_scan_string(raw: str) -> Path:
+    """Normalize path separators so Windows-like paths work in cross-platform tests."""
+    return Path(raw.replace("\\", "/"))
+
+
+def _normalize_windows_cursor_exe_path(raw: object) -> Optional[Path]:
+    """Parse a registry/PATH value into a Cursor.exe path."""
+    if not isinstance(raw, str):
+        return None
+    value = os.path.expandvars(raw.strip())
+    if not value:
+        return None
+
+    if value.startswith('"'):
+        end = value.find('"', 1)
+        if end > 1:
+            value = value[1:end]
+        else:
+            value = value[1:]
+    else:
+        exe_idx = value.lower().find(".exe")
+        if exe_idx != -1:
+            value = value[: exe_idx + 4]
+        comma_idx = value.find(",")
+        if comma_idx != -1:
+            value = value[:comma_idx]
+        value = value.strip()
+
+    if not value:
+        return None
+    path = _path_from_scan_string(value)
+    if path.name.lower() != "cursor.exe":
+        return None
+    return path
+
+
+def _windows_gui_root_from_exe(exe_path: Path) -> Path:
+    """Derive resources/app from a Cursor.exe path."""
+    return exe_path.parent / "resources" / "app"
+
+
+def _windows_cursor_exe_from_path_command(raw: Optional[str]) -> Optional[Path]:
+    """Resolve PATH results like Cursor.exe or resources/app/bin/cursor.cmd."""
+    if not isinstance(raw, str):
+        return None
+    path = _path_from_scan_string(raw)
+    name = path.name.lower()
+    if name == "cursor.exe":
+        return path
+    if name == "cursor.cmd":
+        lower_parts = [part.lower() for part in path.parts]
+        if len(lower_parts) >= 4 and lower_parts[-4:] == ["resources", "app", "bin", "cursor.cmd"]:
+            return path.parents[3] / "Cursor.exe"
+        if len(lower_parts) >= 2 and lower_parts[-2:] == ["bin", "cursor.cmd"]:
+            return path.parents[1] / "Cursor.exe"
+    return None
+
+
+def _windows_registry_hives() -> Sequence[object]:
+    """Return the registry hives consulted for Cursor discovery."""
+    if winreg is None:
+        return ()
+    return (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE)
+
+
+def _read_windows_registry_value(hive: object, subkey: str, value_name: str = "") -> Optional[str]:
+    """Best-effort registry value read."""
+    if winreg is None:
+        return None
+    try:
+        with winreg.OpenKey(hive, subkey) as key:
+            value, _ = winreg.QueryValueEx(key, value_name)
+    except OSError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _iter_windows_registry_subkeys(hive: object, subkey: str) -> List[str]:
+    """Enumerate registry subkey names under a given key."""
+    if winreg is None:
+        return []
+    try:
+        with winreg.OpenKey(hive, subkey) as key:
+            count, _, _ = winreg.QueryInfoKey(key)
+            return [winreg.EnumKey(key, i) for i in range(count)]
+    except OSError:
+        return []
+
+
+def _windows_registry_app_paths_cursor_exes() -> List[Path]:
+    """Read Cursor.exe from the standard App Paths registration."""
+    candidates: List[Path] = []
+    for hive in _windows_registry_hives():
+        exe_path = _normalize_windows_cursor_exe_path(
+            _read_windows_registry_value(hive, _WINDOWS_APP_PATHS_CURSOR)
+        )
+        if exe_path is not None:
+            candidates.append(exe_path)
+    return _dedupe_paths(candidates, case_insensitive=True)
+
+
+def _windows_registry_uninstall_cursor_exes() -> List[Path]:
+    """Read Cursor.exe from uninstall metadata when App Paths is absent."""
+    candidates: List[Path] = []
+    for hive in _windows_registry_hives():
+        for base_key in _WINDOWS_UNINSTALL_KEYS:
+            for entry_name in _iter_windows_registry_subkeys(hive, base_key):
+                subkey = f"{base_key}\\{entry_name}"
+                display_name = _read_windows_registry_value(hive, subkey, "DisplayName")
+                if not isinstance(display_name, str) or "cursor" not in display_name.lower():
+                    continue
+                display_icon = _normalize_windows_cursor_exe_path(
+                    _read_windows_registry_value(hive, subkey, "DisplayIcon")
+                )
+                if display_icon is not None:
+                    candidates.append(display_icon)
+                install_location = _read_windows_registry_value(hive, subkey, "InstallLocation")
+                if isinstance(install_location, str) and install_location.strip():
+                    candidates.append(_path_from_scan_string(install_location.strip()) / "Cursor.exe")
+    return _dedupe_paths(candidates, case_insensitive=True)
+
+
+def _native_windows_registry_cursor_exes() -> List[Path]:
+    """Registry-backed Cursor.exe discovery for native Windows."""
+    return _dedupe_paths(
+        _windows_registry_app_paths_cursor_exes() + _windows_registry_uninstall_cursor_exes(),
+        case_insensitive=True,
+    )
+
+
+def _windows_exe_candidates_for_roots(
     *,
     local_appdata_roots: Sequence[Path] = (),
     program_files_roots: Sequence[Path] = (),
 ) -> List[Path]:
-    """Build GUI install candidates from Windows LocalAppData/Program Files roots."""
+    """Build Cursor.exe fallback candidates from Windows LocalAppData/Program Files roots."""
     candidates: List[Path] = []
     for local_root in local_appdata_roots:
         candidates.extend([
-            local_root / "Programs" / "cursor" / "resources" / "app",
-            local_root / "cursor" / "resources" / "app",
+            local_root / "Programs" / "cursor" / "Cursor.exe",
+            local_root / "cursor" / "Cursor.exe",
         ])
     for program_root in program_files_roots:
-        candidates.append(program_root / "Cursor" / "resources" / "app")
-    return _dedupe_paths(candidates)
+        candidates.append(program_root / "Cursor" / "Cursor.exe")
+    return _dedupe_paths(candidates, case_insensitive=True)
 
 
-def _native_windows_gui_candidates() -> List[Path]:
-    """Return Windows GUI install candidates from the current environment."""
+def _windows_gui_candidates_from_exes(exe_paths: Sequence[Path]) -> List[Path]:
+    """Convert Cursor.exe candidates into resources/app roots."""
+    return _dedupe_paths(
+        [_windows_gui_root_from_exe(path) for path in exe_paths],
+        case_insensitive=True,
+    )
+
+
+def _native_windows_cursor_exe_candidates() -> List[Path]:
+    """Return native Windows Cursor.exe candidates in priority order."""
     local_appdata_roots: List[Path] = []
     local_appdata = _nonempty_env_path("LOCALAPPDATA")
     if local_appdata is not None:
@@ -263,10 +414,24 @@ def _native_windows_gui_candidates() -> List[Path]:
         if root is not None:
             program_files_roots.append(root)
 
-    return _windows_gui_candidates_for_roots(
-        local_appdata_roots=local_appdata_roots,
-        program_files_roots=program_files_roots,
+    candidates: List[Path] = []
+    candidates.extend(_native_windows_registry_cursor_exes())
+    for command in ("cursor", "cursor.exe"):
+        exe_path = _windows_cursor_exe_from_path_command(shutil.which(command))
+        if exe_path is not None:
+            candidates.append(exe_path)
+    candidates.extend(
+        _windows_exe_candidates_for_roots(
+            local_appdata_roots=local_appdata_roots,
+            program_files_roots=program_files_roots,
+        )
     )
+    return _dedupe_paths(candidates, case_insensitive=True)
+
+
+def _native_windows_gui_candidates() -> List[Path]:
+    """Return Windows GUI install candidates from the current environment."""
+    return _windows_gui_candidates_from_exes(_native_windows_cursor_exe_candidates())
 
 
 def _wsl_gui_candidates_from_mount_root(mnt_c: Path) -> List[Path]:
@@ -280,12 +445,14 @@ def _wsl_gui_candidates_from_mount_root(mnt_c: Path) -> List[Path]:
         for user_dir in _ordered_wsl_user_dirs(_wsl_user_dirs(users_dir)):
             local_appdata_roots.append(user_dir / "AppData" / "Local")
 
-    return _windows_gui_candidates_for_roots(
-        local_appdata_roots=local_appdata_roots,
-        program_files_roots=[
-            mnt_c / "Program Files",
-            mnt_c / "Program Files (x86)",
-        ],
+    return _windows_gui_candidates_from_exes(
+        _windows_exe_candidates_for_roots(
+            local_appdata_roots=local_appdata_roots,
+            program_files_roots=[
+                mnt_c / "Program Files",
+                mnt_c / "Program Files (x86)",
+            ],
+        )
     )
 
 

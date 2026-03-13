@@ -19,11 +19,15 @@ from cursor_gui_patch.discovery import (
     _gui_candidates,
     _is_cursor_app_root,
     _is_wsl,
+    _native_windows_cursor_exe_candidates,
     _native_windows_gui_candidates,
     _nonempty_env_path,
     _safe_relative_folder_name,
     _preferred_windows_usernames,
     _version_id_from_path,
+    _windows_cursor_exe_from_path_command,
+    _windows_gui_root_from_exe,
+    _normalize_windows_cursor_exe_path,
     _wsl_user_dirs,
     _wsl_gui_candidates_from_mount_root,
     discover_all,
@@ -234,6 +238,32 @@ class TestGetServerDataFolderName:
 
 
 class TestGuiCandidates:
+    def test_normalize_windows_cursor_exe_path_handles_display_icon_suffix(self):
+        path = _normalize_windows_cursor_exe_path(
+            r'"C:\Users\alice\AppData\Local\Programs\cursor\Cursor.exe",0'
+        )
+        assert path is not None
+        assert path.as_posix() == "C:/Users/alice/AppData/Local/Programs/cursor/Cursor.exe"
+
+    def test_normalize_windows_cursor_exe_path_rejects_other_exes(self):
+        assert _normalize_windows_cursor_exe_path(r'"C:\Apps\NotCursor.exe",0') is None
+
+    def test_windows_cursor_exe_from_path_command_resolves_cursor_cmd(self):
+        path = _windows_cursor_exe_from_path_command(
+            "/Users/alice/AppData/Local/Programs/cursor/resources/app/bin/cursor.cmd"
+        )
+        assert path == Path("/Users/alice/AppData/Local/Programs/cursor/Cursor.exe")
+
+    def test_windows_cursor_exe_from_path_command_handles_standard_bin_layout(self):
+        path = _windows_cursor_exe_from_path_command(
+            "/Users/alice/AppData/Local/Programs/Cursor/bin/cursor.cmd"
+        )
+        assert path == Path("/Users/alice/AppData/Local/Programs/Cursor/Cursor.exe")
+
+    def test_windows_gui_root_from_exe_derives_resources_app(self):
+        root = _windows_gui_root_from_exe(Path("/fake/Programs/cursor/Cursor.exe"))
+        assert root == Path("/fake/Programs/cursor/resources/app")
+
     @mock.patch("cursor_gui_patch.discovery.sys")
     def test_darwin_returns_app_bundle_paths(self, mock_sys):
         mock_sys.platform = "darwin"
@@ -250,7 +280,9 @@ class TestGuiCandidates:
         },
         clear=True,
     )
-    def test_native_windows_candidates_include_user_and_system_paths(self):
+    @mock.patch("cursor_gui_patch.discovery.shutil.which", return_value=None)
+    @mock.patch("cursor_gui_patch.discovery._native_windows_registry_cursor_exes", return_value=[])
+    def test_native_windows_candidates_include_user_and_system_paths(self, *_):
         candidates = _native_windows_gui_candidates()
         paths = [c.as_posix() for c in candidates]
         assert "/fake/AppData/Local/Programs/cursor/resources/app" in paths
@@ -258,13 +290,85 @@ class TestGuiCandidates:
         assert "/fake/Program Files/Cursor/resources/app" in paths
         assert len(candidates) == 3
 
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LOCALAPPDATA": "/fake/AppData/Local",
+            "ProgramFiles": "/fake/Program Files",
+        },
+        clear=True,
+    )
+    @mock.patch("cursor_gui_patch.discovery.shutil.which", return_value="/from-path/resources/app/bin/cursor.cmd")
+    @mock.patch(
+        "cursor_gui_patch.discovery._native_windows_registry_cursor_exes",
+        return_value=[Path("/from-registry/Cursor.exe")],
+    )
+    def test_native_windows_cursor_exe_candidates_prioritize_registry_then_path_then_fallback(self, *_):
+        candidates = _native_windows_cursor_exe_candidates()
+        paths = [c.as_posix() for c in candidates]
+        assert paths == [
+            "/from-registry/Cursor.exe",
+            "/from-path/Cursor.exe",
+            "/fake/AppData/Local/Programs/cursor/Cursor.exe",
+            "/fake/AppData/Local/cursor/Cursor.exe",
+            "/fake/Program Files/Cursor/Cursor.exe",
+        ]
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LOCALAPPDATA": "/fake/AppData/Local",
+            "ProgramFiles": "/fake/Program Files",
+        },
+        clear=True,
+    )
+    @mock.patch("cursor_gui_patch.discovery.shutil.which", return_value=None)
+    @mock.patch(
+        "cursor_gui_patch.discovery._native_windows_registry_cursor_exes",
+        return_value=[Path("/from-registry/Cursor.exe")],
+    )
+    def test_native_windows_gui_candidates_prefer_exe_sources(self, *_):
+        candidates = _native_windows_gui_candidates()
+        paths = [c.as_posix() for c in candidates]
+        assert paths[0] == "/from-registry/resources/app"
+        assert "/fake/AppData/Local/Programs/cursor/resources/app" in paths
+        assert "/fake/AppData/Local/cursor/resources/app" in paths
+        assert "/fake/Program Files/Cursor/resources/app" in paths
+        assert len(candidates) == 4
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LOCALAPPDATA": "/fake/AppData/Local",
+            "ProgramFiles": "/fake/Program Files",
+        },
+        clear=True,
+    )
+    @mock.patch("cursor_gui_patch.discovery.shutil.which", return_value=None)
+    @mock.patch(
+        "cursor_gui_patch.discovery._native_windows_registry_cursor_exes",
+        return_value=[Path("/fake/AppData/Local/Programs/Cursor/Cursor.exe")],
+    )
+    def test_native_windows_cursor_exe_candidates_dedupe_case_insensitive(self, *_):
+        candidates = _native_windows_cursor_exe_candidates()
+        paths = [c.as_posix() for c in candidates]
+        assert paths == [
+            "/fake/AppData/Local/Programs/Cursor/Cursor.exe",
+            "/fake/AppData/Local/cursor/Cursor.exe",
+            "/fake/Program Files/Cursor/Cursor.exe",
+        ]
+
     @mock.patch.dict(os.environ, {}, clear=True)
-    def test_native_windows_candidates_empty_without_env(self):
+    @mock.patch("cursor_gui_patch.discovery.shutil.which", return_value=None)
+    @mock.patch("cursor_gui_patch.discovery._native_windows_registry_cursor_exes", return_value=[])
+    def test_native_windows_candidates_empty_without_env(self, *_):
         candidates = _native_windows_gui_candidates()
         assert len(candidates) == 0
 
     @mock.patch.dict(os.environ, {"ProgramFiles(x86)": "/fake/Program Files (x86)"}, clear=True)
-    def test_native_windows_candidates_include_x86_system_path(self):
+    @mock.patch("cursor_gui_patch.discovery.shutil.which", return_value=None)
+    @mock.patch("cursor_gui_patch.discovery._native_windows_registry_cursor_exes", return_value=[])
+    def test_native_windows_candidates_include_x86_system_path(self, *_):
         candidates = _native_windows_gui_candidates()
         paths = [c.as_posix() for c in candidates]
         assert paths == ["/fake/Program Files (x86)/Cursor/resources/app"]

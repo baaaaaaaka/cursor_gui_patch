@@ -23,6 +23,10 @@ jobs:
       - name: Install package and test dependencies
         run: pip install -e . pytest
 
+      - name: Run Windows discovery integration tests
+        if: runner.os == 'Windows'
+        run: python -m pytest tests/test_windows_discovery_integration.py -v
+
       - name: Run tests
         run: python -m pytest tests/ -v
 
