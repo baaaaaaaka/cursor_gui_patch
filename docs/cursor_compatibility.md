@@ -11,3 +11,4 @@ Automatically updated by CI.
 | 2.6.13 | 60faf7b5 | 2026-03-07 | pass |
 | 2.6.14 | eb1c4e07 | 2026-03-09 | pass |
 | 2.6.18 | 68fbec5a | 2026-03-10 | pass |
+| 2.6.19 | 224838f9 | 2026-03-13 | pass |
