@@ -1,11 +1,5 @@
 # cgp — Cursor GUI Patch
 
-Patch tool for Cursor IDE: unlock all models and disable admin auto-run restrictions.
-
-## What it does
-
-- **Models patch**: Redirects `getUsableModels` to `availableModels`, making all models visible
-- **Auto-run patch**: Disables team admin auto-run controls so you keep full control
 
 ## Quick Start
 
