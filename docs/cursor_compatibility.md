@@ -18,3 +18,4 @@ Automatically updated by CI.
 | 3.0.4 | 63715ffc | 2026-04-02 | pass |
 | 3.0.9 | 93e276db | 2026-04-03 | pass |
 | 3.0.12 | a80ff7df | 2026-04-04 | pass |
+| 3.0.13 | 48a15759 | 2026-04-08 | pass |
