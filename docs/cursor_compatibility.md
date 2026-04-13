@@ -20,3 +20,4 @@ Automatically updated by CI.
 | 3.0.12 | a80ff7df | 2026-04-04 | pass |
 | 3.0.13 | 48a15759 | 2026-04-08 | pass |
 | 3.0.16 | 475871d1 | 2026-04-10 | pass |
+| 3.1.10 | dacbe9b3 | 2026-04-13 | pass |
