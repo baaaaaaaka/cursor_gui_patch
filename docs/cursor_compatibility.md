@@ -22,3 +22,4 @@ Automatically updated by CI.
 | 3.0.16 | 475871d1 | 2026-04-10 | pass |
 | 3.1.10 | dacbe9b3 | 2026-04-13 | pass |
 | 3.1.14 | d8673fb5 | 2026-04-15 | pass |
+| 3.1.15 | 3a67af7b | 2026-04-15 | pass |
