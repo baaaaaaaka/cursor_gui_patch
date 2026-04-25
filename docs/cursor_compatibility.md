@@ -25,3 +25,4 @@ Automatically updated by CI.
 | 3.1.15 | 3a67af7b | 2026-04-15 | pass |
 | 3.1.17 | fce1e9ab | 2026-04-20 | pass |
 | 3.2.10 | 87903b25 | 2026-04-24 | pass |
+| 3.2.11 | e9ee1339 | 2026-04-25 | pass |
