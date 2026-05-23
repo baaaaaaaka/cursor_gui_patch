@@ -37,3 +37,4 @@ Automatically updated by CI.
 | 3.4.17 | 93e603f7 | 2026-05-14 | pass |
 | 3.4.20 | 0cf8b068 | 2026-05-15 | pass |
 | 3.5.17 | d5b2fc09 | 2026-05-20 | pass |
+| 3.5.33 | aac81804 | 2026-05-23 | pass |
