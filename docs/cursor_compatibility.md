@@ -39,3 +39,4 @@ Automatically updated by CI.
 | 3.5.17 | d5b2fc09 | 2026-05-20 | pass |
 | 3.5.33 | aac81804 | 2026-05-23 | pass |
 | 3.5.38 | 009bb5a3 | 2026-05-27 | pass |
+| 3.6.21 | e7a7e93f | 2026-05-29 | pass |
