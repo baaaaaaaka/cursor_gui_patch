@@ -42,3 +42,4 @@ Automatically updated by CI.
 | 3.6.21 | e7a7e93f | 2026-05-29 | pass |
 | 3.6.31 | 81fcf293 | 2026-06-01 | pass |
 | 3.7.12 | b887a26c | 2026-06-06 | pass |
+| 3.7.19 | 80c653c2 | 2026-06-08 | pass |
