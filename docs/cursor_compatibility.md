@@ -47,3 +47,4 @@ Automatically updated by CI.
 | 3.7.27 | e48ee610 | 2026-06-10 | pass |
 | 3.7.36 | 776d1f9d | 2026-06-13 | pass |
 | 3.7.42 | 5702c9cf | 2026-06-16 | pass |
+| 3.8.11 | e56ad344 | 2026-06-18 | pass |
