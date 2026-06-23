@@ -48,3 +48,4 @@ Automatically updated by CI.
 | 3.7.36 | 776d1f9d | 2026-06-13 | pass |
 | 3.7.42 | 5702c9cf | 2026-06-16 | pass |
 | 3.8.11 | e56ad344 | 2026-06-18 | pass |
+| 3.8.22 | 46fb7aaf | 2026-06-23 | pass |
