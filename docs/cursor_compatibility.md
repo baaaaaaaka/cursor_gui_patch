@@ -51,3 +51,4 @@ Automatically updated by CI.
 | 3.8.22 | 46fb7aaf | 2026-06-23 | pass |
 | 3.8.23 | 7cf19b74 | 2026-06-24 | pass |
 | 3.8.24 | cf80f4b9 | 2026-06-25 | pass |
+| 3.9.8 | 4aa8ff1b | 2026-06-26 | pass |
