@@ -55,3 +55,4 @@ Automatically updated by CI.
 | 3.9.16 | 042b3c1a | 2026-06-28 | pass |
 | 3.10.11 | 4ef9fe3d | 2026-07-06 | pass |
 | 3.10.17 | c89f45b8 | 2026-07-06 | pass |
+| 3.10.20 | 23b9fb20 | 2026-07-08 | pass |
