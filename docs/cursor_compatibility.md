@@ -58,3 +58,4 @@ Automatically updated by CI.
 | 3.10.20 | 23b9fb20 | 2026-07-08 | pass |
 | 3.11.13 | 3f21b08f | 2026-07-11 | pass |
 | 3.11.19 | bf249e6e | 2026-07-13 | pass |
+| 3.11.25 | fc2563ec | 2026-07-16 | pass |
