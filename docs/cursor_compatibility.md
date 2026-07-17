@@ -60,3 +60,4 @@ Automatically updated by CI.
 | 3.11.19 | bf249e6e | 2026-07-13 | pass |
 | 3.11.25 | fc2563ec | 2026-07-16 | pass |
 | 3.12.10 | 24a12dbd | 2026-07-16 | pass |
+| 3.12.17 | 0fb76205 | 2026-07-17 | pass |
