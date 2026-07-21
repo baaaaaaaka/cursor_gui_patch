@@ -61,3 +61,4 @@ Automatically updated by CI.
 | 3.11.25 | fc2563ec | 2026-07-16 | pass |
 | 3.12.10 | 24a12dbd | 2026-07-16 | pass |
 | 3.12.17 | 0fb76205 | 2026-07-17 | pass |
+| 3.12.29 | cd1c87ff | 2026-07-21 | pass |
