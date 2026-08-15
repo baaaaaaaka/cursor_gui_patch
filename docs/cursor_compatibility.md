@@ -70,3 +70,4 @@ Automatically updated by CI.
 | 3.14.27 | 047548b0 | 2026-08-06 | pass |
 | 3.15.6 | a1f68654 | 2026-08-07 | pass |
 | 3.15.19 | de07bee8 | 2026-08-13 | pass |
+| 3.16.17 | 6b2afae0 | 2026-08-15 | pass |
