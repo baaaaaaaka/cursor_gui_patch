@@ -73,3 +73,4 @@ Automatically updated by CI.
 | 3.16.17 | 6b2afae0 | 2026-08-15 | pass |
 | 3.16.29 | 62464559 | 2026-08-19 | pass |
 | 3.17.8 | 2fdd31c9 | 2026-08-21 | pass |
+| 3.17.19 | ae3a2b72 | 2026-08-25 | pass |
