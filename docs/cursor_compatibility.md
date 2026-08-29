@@ -75,3 +75,4 @@ Automatically updated by CI.
 | 3.17.8 | 2fdd31c9 | 2026-08-21 | pass |
 | 3.17.19 | ae3a2b72 | 2026-08-25 | pass |
 | 3.17.21 | 8f2a112c | 2026-08-27 | pass |
+| 3.18.9 | 2ba48ff3 | 2026-08-29 | pass |
