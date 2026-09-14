@@ -83,3 +83,4 @@ Automatically updated by CI.
 | 3.20.10 | d6f462cd | 2026-09-11 | pass |
 | 3.20.14 | 67ac8ff8 | 2026-09-12 | pass |
 | 3.20.17 | 0c32194e | 2026-09-12 | pass |
+| 3.20.21 | f09fca38 | 2026-09-14 | pass |
