@@ -94,3 +94,4 @@ Automatically updated by CI.
 | 3.23.23 | 2dac2428 | 2026-10-05 | pass |
 | 3.24.9 | cd6d2a1f | 2026-10-09 | pass |
 | 3.24.12 | 37b86594 | 2026-10-10 | pass |
+| 3.24.18 | be4c9e53 | 2026-10-14 | pass |
