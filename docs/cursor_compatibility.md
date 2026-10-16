@@ -95,3 +95,4 @@ Automatically updated by CI.
 | 3.24.9 | cd6d2a1f | 2026-10-09 | pass |
 | 3.24.12 | 37b86594 | 2026-10-10 | pass |
 | 3.24.18 | be4c9e53 | 2026-10-14 | pass |
+| 3.25.6 | f0df777c | 2026-10-16 | pass |
