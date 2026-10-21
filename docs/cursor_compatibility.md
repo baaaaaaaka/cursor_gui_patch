@@ -97,3 +97,4 @@ Automatically updated by CI.
 | 3.24.18 | be4c9e53 | 2026-10-14 | pass |
 | 3.25.6 | f0df777c | 2026-10-16 | pass |
 | 3.25.9 | 5d4df965 | 2026-10-18 | pass |
+| 3.26.13 | 3bfec373 | 2026-10-21 | pass |
