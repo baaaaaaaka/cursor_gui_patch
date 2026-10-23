@@ -100,3 +100,4 @@ Automatically updated by CI.
 | 3.26.13 | 3bfec373 | 2026-10-21 | pass |
 | 3.26.16 | 8fcb8ace | 2026-10-21 | pass |
 | 3.27.6 | f7119520 | 2026-10-22 | pass |
+| 3.27.12 | df132ffb | 2026-10-23 | pass |
