@@ -102,3 +102,4 @@ Automatically updated by CI.
 | 3.27.6 | f7119520 | 2026-10-22 | pass |
 | 3.27.12 | df132ffb | 2026-10-23 | pass |
 | 3.27.14 | 69b724eb | 2026-10-26 | pass |
+| 3.27.22 | b1aa50cb | 2026-10-27 | pass |
