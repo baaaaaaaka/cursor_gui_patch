@@ -103,3 +103,4 @@ Automatically updated by CI.
 | 3.27.12 | df132ffb | 2026-10-23 | pass |
 | 3.27.14 | 69b724eb | 2026-10-26 | pass |
 | 3.27.22 | b1aa50cb | 2026-10-27 | pass |
+| 3.28.7 | 25b52e7d | 2026-11-03 | pass |
