@@ -106,3 +106,4 @@ Automatically updated by CI.
 | 3.28.7 | 25b52e7d | 2026-11-03 | pass |
 | 3.29.9 | 306d153d | 2026-11-05 | pass |
 | 3.29.15 | 86776fcb | 2026-11-10 | pass |
+| 3.30.8 | 4a44c846 | 2026-11-13 | download_failed |
