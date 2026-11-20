@@ -108,3 +108,4 @@ Automatically updated by CI.
 | 3.29.15 | 86776fcb | 2026-11-10 | pass |
 | 3.30.8 | 4a44c846 | 2026-11-13 | download_failed |
 | 3.30.14 | 5f54c817 | 2026-11-20 | download_failed |
+| 3.31.11 | 52fdf018 | 2026-11-20 | download_failed |
