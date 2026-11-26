@@ -110,4 +110,4 @@ Automatically updated by CI.
 | 3.30.14 | 5f54c817 | 2026-11-20 | download_failed |
 | 3.31.11 | 52fdf018 | 2026-11-20 | download_failed |
 | 3.31.15 | 3eb8c133 | 2026-11-25 | download_failed |
-| 3.32.4 | 0925c4b8 | 2026-11-25 | download_failed |
+| 3.32.4 | 0925c4b8 | 2026-11-26 | download_failed |
