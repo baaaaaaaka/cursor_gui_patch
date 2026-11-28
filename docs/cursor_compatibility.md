@@ -111,3 +111,4 @@ Automatically updated by CI.
 | 3.31.11 | 52fdf018 | 2026-11-20 | download_failed |
 | 3.31.15 | 3eb8c133 | 2026-11-25 | download_failed |
 | 3.32.4 | 0925c4b8 | 2026-11-27 | download_failed |
+| 3.32.10 | 0d3b96e4 | 2026-11-28 | download_failed |
